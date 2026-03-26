@@ -1,0 +1,57 @@
+# decomp.R
+# ::rtemis::
+# 2025 EDG rtemis.org
+
+# %% decomp ----
+#' Perform Data Decomposition
+#'
+#' Perform linear or non-linear decomposition of numeric data.
+#'
+#' @details
+#' See [docs.rtemis.org/r](https://docs.rtemis.org/r/) for detailed documentation.
+#'
+#' @param x Matrix or data frame: Input data.
+#' @param algorithm Character: Decomposition algorithm.
+#' @param config DecompositionConfig: Algorithm-specific config.
+#' @param verbosity Integer: Verbosity level.
+#'
+#' @return `Decomposition` object.
+#'
+#' @author EDG
+#' @export
+#'
+#' @examples
+#' iris_pca <- decomp(exc(iris, "Species"), algorithm = "PCA")
+decomp <- function(x, algorithm = "ICA", config = NULL, verbosity = 1L) {
+  # Checks ----
+  if (is.null(config)) {
+    config <- get_default_decomparams(algorithm)
+  }
+  check_is_S7(config, DecompositionConfig)
+
+  # Intro ----
+  start_time <- intro(verbosity = verbosity)
+
+  # Data ----
+  if (verbosity > 0L) {
+    summarize_unsupervised(x)
+  }
+
+  # Decompose ----
+  algorithm <- get_decom_name(algorithm)
+  if (verbosity > 0L) {
+    msg0("Decomposing with ", algorithm, "...")
+  }
+
+  # decomp_ -> list with elements 'decom' and 'transformed'
+  decom <- decomp_(config = config, x = x, verbosity = verbosity)
+
+  # Outro ----
+  outro(start_time, verbosity = verbosity)
+  Decomposition(
+    algorithm = algorithm,
+    config = config,
+    decom = decom[["decom"]],
+    transformed = decom[["transformed"]]
+  )
+} # /rtemis::decomp
