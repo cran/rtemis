@@ -1,6 +1,6 @@
 # train_LightRF.R
 # ::rtemis::
-# 2025 EDG rtemis.org
+# 2025- EDG rtemis.org
 
 # References
 # LightGBM parameters: https://lightgbm.readthedocs.io/en/latest/Parameters.html
@@ -22,18 +22,19 @@ method(train_, LightRFHyperparameters) <- function(
   x,
   weights = NULL,
   dat_validation = NULL,
+  execution_config = setup_ExecutionConfig(),
   verbosity = 1L
 ) {
   # Dependencies ----
   check_dependencies("lightgbm")
 
-  # Checks ----
-  check_is_S7(hyperparameters, LightRFHyperparameters)
-
   # Hyperparameters ----
   # Hyperparameters must be either untunable or frozen by `train`.
   if (needs_tuning(hyperparameters)) {
-    cli::cli_abort("Hyperparameters must be fixed - use train() instead.")
+    rtemis.core::abort(
+      "Hyperparameters must be fixed - use train() instead.",
+      class = c("rtemis_value_error", "rtemis_input_error")
+    )
   }
 
   # Data ----

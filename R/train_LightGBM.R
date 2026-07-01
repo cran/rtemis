@@ -1,6 +1,6 @@
 # train_LightGBM.R
 # ::rtemis::
-# 2025 EDG rtemis.org
+# 2025- EDG rtemis.org
 
 # LightGBM parameters
 # https://lightgbm.readthedocs.io/en/latest/Parameters.html
@@ -22,18 +22,19 @@ method(train_, LightGBMHyperparameters) <- function(
   x,
   weights = NULL,
   dat_validation = NULL,
+  execution_config = setup_ExecutionConfig(),
   verbosity = 1L
 ) {
   # Dependencies ----
   check_dependencies("lightgbm")
 
-  # Checks ----
-  check_is_S7(hyperparameters, LightGBMHyperparameters)
-
   # Hyperparameters ----
   # Hyperparameters must be either untunable or frozen by `train`.
   if (needs_tuning(hyperparameters)) {
-    cli::cli_abort("Hyperparameters must be fixed - use train() instead.")
+    rtemis.core::abort(
+      "Hyperparameters must be fixed - use train() instead.",
+      class = c("rtemis_value_error", "rtemis_input_error")
+    )
   }
 
   # Convert "null" nrounds to max_nrounds
@@ -118,7 +119,8 @@ method(train_, LightGBMHyperparameters) <- function(
 #' Predict from LightGBM model
 #'
 #' @param model lgb.Booster object.
-#' @param newdata tabular data: Data to predict on.
+#' @param newdata tabular data: Data to predict on. Will have been preprocessed by
+#' `predict.Supervised` before calling this method if algorithm-specific preprocessing was performed during training.
 #' @param type Character: Type of supervised learning.
 #'
 #' @keywords internal
@@ -133,8 +135,7 @@ method(predict_super, class_lgb.Booster) <- function(
   check_inherits(newdata, "data.frame")
 
   # Algorithm-specific preprocessing (factor2integer) is applied by
-  # predict.Supervised before calling this method. See R/train.R:420-504
-  # and R/07_S7_Supervised.R:127-135
+  # predict.Supervised before calling this method. See R/train.R and R/07_Supervised.R
 
   # Predict ----
   predict(model, newdata = as.matrix(newdata))
@@ -150,8 +151,7 @@ method(predict_super, class_lgb.Booster) <- function(
 #' @noRd
 method(varimp_super, class_lgb.Booster) <- function(model) {
   check_inherits(model, "lgb.Booster")
-  vi <- lightgbm::lgb.importance(model, percentage = TRUE)
-  out <- data.frame(t(vi[["Gain"]]))
-  names(out) <- vi[["Feature"]]
-  out
+  vi <- lightgbm::lgb.importance(model, percentage = TRUE) # -> data.table
+  names(vi)[1] <- "variable"
+  VariableImportance(vi)
 } # /rtemis::varimp_super.lgb.Booster

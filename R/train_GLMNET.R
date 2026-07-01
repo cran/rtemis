@@ -23,18 +23,19 @@ method(train_, GLMNETHyperparameters) <- function(
   x,
   weights = NULL,
   dat_validation = NULL,
+  execution_config = setup_ExecutionConfig(),
   verbosity = 1L
 ) {
   # Dependencies ----
   check_dependencies("glmnet")
 
-  # Checks ----
-  check_is_S7(hyperparameters, GLMNETHyperparameters)
-
   # Hyperparameters ----
   # Hyperparameters must be either untunable or frozen by `train`.
   if (needs_tuning(hyperparameters)) {
-    cli::cli_abort("Hyperparameters must be fixed - use train() instead.")
+    rtemis.core::abort(
+      "Hyperparameters must be fixed - use train() instead.",
+      class = c("rtemis_value_error", "rtemis_input_error")
+    )
   }
 
   # Convert "null" lambda to NULL
@@ -82,13 +83,14 @@ method(train_, GLMNETHyperparameters) <- function(
   if (is.null(hyperparameters[["penalty_factor"]])) {
     hyperparameters@hyperparameters[["penalty_factor"]] <- rep(1, NCOL(xm))
     if (verbosity > 1L) {
-      msg_info("NCOL(xm): ", NCOL(xm))
-      msg_info('Updated hyperparameters[["penalty_factor"]] to all 1s.')
+      info("NCOL(xm): ", NCOL(xm))
+      info('Updated hyperparameters[["penalty_factor"]] to all 1s.')
     }
   } else {
     if (length(hyperparameters[["penalty_factor"]]) != NCOL(xm)) {
-      cli::cli_abort(
-        "Length of penalty_factor must be equal to the number of predictors."
+      rtemis.core::abort(
+        "Length of penalty_factor must be equal to the number of predictors.",
+        class = c("rtemis_length_error", "rtemis_input_error")
       )
     }
   }
@@ -135,7 +137,12 @@ method(train_, GLMNETHyperparameters) <- function(
 #' @author EDG
 #' @keywords internal
 #' @noRd
-method(predict_super, class_glmnet) <- function(model, newdata, type = NULL) {
+method(predict_super, class_glmnet) <- function(
+  model,
+  newdata,
+  type = NULL,
+  verbosity = 0L
+) {
   # Determine type
   # if model@classnames exists, type is Classification
   if (is.null(type)) {
@@ -166,7 +173,8 @@ method(predict_super, class_glmnet) <- function(model, newdata, type = NULL) {
 method(predict_super, class_cv.glmnet) <- function(
   model,
   newdata,
-  type = NULL
+  type = NULL,
+  verbosity = 0L
 ) {
   # Determine type
   # if model@classnames exists, type is Classification
@@ -204,16 +212,24 @@ method(predict_super, class_cv.glmnet) <- function(
 method(varimp_super, class_glmnet) <- function(model) {
   coefs <- coef(model)
 
-  # In multiclass, coef(model) returns a list of coefficient matrices, one for each class.
+  # In multiclass, coef(model) returns a list of coefficient matrices, one per class.
+  # Not yet supported as VariableImportance.
   if (is.list(coefs)) {
-    return(coefs)
+    return(NULL)
   }
 
   if (NCOL(coefs) > 1) {
     msg("GLMNET with multiple sets of coefficients - returning first column.")
   }
+
   # Exclude intercept
   coefs <- coefs[, 1][-1]
+  VariableImportance(
+    data.table(
+      variable = names(coefs),
+      Coefficient = unname(coefs)
+    )
+  )
 } # /rtemis::varimp_super.class_glmnet
 
 
@@ -221,5 +237,20 @@ method(varimp_super, class_glmnet) <- function(model) {
 #' @keywords internal
 #' @noRd
 method(varimp_super, class_cv.glmnet) <- function(model) {
-  coef(model)
+  coefs <- coef(model)
+
+  # In multiclass, coef(model) returns a list of coefficient matrices, one per class.
+  # Not yet supported as VariableImportance.
+  if (is.list(coefs)) {
+    return(NULL)
+  }
+
+  # Exclude intercept
+  coefs <- coefs[, 1][-1]
+  VariableImportance(
+    data.table(
+      variable = names(coefs),
+      Coefficient = unname(coefs)
+    )
+  )
 } # /rtemis::varimp_super.class_cv.glmnet

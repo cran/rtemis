@@ -3,7 +3,7 @@
 # 2025- EDG rtemis.org
 
 # %% ClusteringConfig ----
-#' @title ClusteringConfig
+#' ClusteringConfig
 #'
 #' @description
 #' Clustering config class.
@@ -16,6 +16,7 @@
 #' @noRd
 ClusteringConfig <- new_class(
   name = "ClusteringConfig",
+  package = "rtemis",
   properties = list(
     algorithm = class_character,
     config = class_list
@@ -262,7 +263,7 @@ CMeansConfig <- new_class(
     check_character(method)
     check_floatpos(m)
     check_float01inc(rate_par)
-    check_inherits(weights, "numeric")
+    rtemis.core::check_numeric(weights)
     check_inherits(control, "list")
     new_object(
       ClusteringConfig(
@@ -320,7 +321,7 @@ setup_CMeans <- function(
   check_floatpos(m)
   stopifnot(m > 1)
   check_float01inc(rate_par)
-  check_inherits(weights, "numeric")
+  rtemis.core::check_numeric(weights)
   CMeansConfig(
     k = k,
     max_iter = max_iter,
@@ -358,7 +359,7 @@ DBSCANConfig <- new_class(
   ) {
     check_floatpos(eps)
     min_points <- clean_posint(min_points)
-    check_inherits(weights, "numeric")
+    rtemis.core::check_numeric(weights)
     check_inherits(border_points, "logical")
     check_inherits(search, "character")
     check_inherits(bucket_size, "integer")
@@ -414,7 +415,7 @@ setup_DBSCAN <- function(
 ) {
   check_floatpos(eps)
   min_points <- clean_posint(min_points)
-  check_inherits(weights, "numeric")
+  rtemis.core::check_numeric(weights)
   check_inherits(border_points, "logical")
   search <- match.arg(search)
   check_inherits(bucket_size, "integer")
@@ -431,3 +432,42 @@ setup_DBSCAN <- function(
     approx = approx
   )
 } # /rtemis::setup_DBSCAN
+
+
+# %% .list_to_ClusteringConfig ----
+#' Convert a list to a ClusteringConfig object
+#'
+#' Internal function used to reconstruct a `ClusteringConfig` object from a named
+#' list, such as the result of parsing a JSON config conforming to the
+#' schema.rtemis.org clustering schema. The list must carry an `algorithm`
+#' element; the remaining elements (flat, or nested under `config`) are passed to
+#' that algorithm's `setup_*` function.
+#'
+#' @param x Named list with an `algorithm` element plus algorithm-specific
+#'   parameters, e.g. `list(algorithm = "DBSCAN", config = list(eps = 0.5))`.
+#'
+#' @return A `ClusteringConfig` object (an algorithm-specific subclass).
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+.list_to_ClusteringConfig <- function(x) {
+  algorithm <- x[["algorithm"]]
+  if (is.null(algorithm)) {
+    rtemis.core::abort(
+      "`algorithm` is required to build a ClusteringConfig.",
+      class = c("rtemis_null_input", "rtemis_input_error")
+    )
+  }
+  algorithm <- get_clust_name(algorithm)
+  # Params may arrive nested under `config` (JSON / S7_to_list serialization) or
+  # flat alongside `algorithm` (UI / server). In the flat shape, drop `algorithm`
+  # and any `$`-prefixed metadata keys (e.g. `$schema`) that are not setup args.
+  params <- if (is.list(x[["config"]])) {
+    x[["config"]]
+  } else {
+    drop <- c("algorithm", grep("^\\$", names(x), value = TRUE))
+    x[setdiff(names(x), drop)]
+  }
+  do.call(get_clust_setup_fn(algorithm), params)
+} # /rtemis::.list_to_ClusteringConfig

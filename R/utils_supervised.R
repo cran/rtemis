@@ -60,13 +60,16 @@ prob2categorical <- function(x, levels, binclasspos = 2L) {
 #' @noRd
 check_supervised_inputs <- function(x, y = NULL) {
   if (is.null(y) && NCOL(x) < 2) {
-    cli::cli_abort("y is missing")
+    rtemis.core::abort(
+      "y is missing.",
+      class = c("rtemis_null_input", "rtemis_input_error")
+    )
   }
 }
 
 #' Move outcome to last column
 #'
-#' @param dat data.frame or similar.
+#' @param dat tabular dataset.
 #' @param outcome_column Character: Name of outcome column.
 #'
 #' @return object of same class as `data`
@@ -82,7 +85,12 @@ set_outcome <- function(dat, outcome_column) {
   id <- grep(outcome_column, names(dat))
   # Check
   if (length(id) == 0) {
-    cli::cli_abort('Column "{outcome_column}" not found in data.')
+    rtemis.core::abort(
+      'Column "',
+      outcome_column,
+      '" not found in data.',
+      class = c("rtemis_value_error", "rtemis_input_error")
+    )
   }
   # Reorder columns
   # => Make S7 generic
@@ -92,6 +100,67 @@ set_outcome <- function(dat, outcome_column) {
     dat[, c(setdiff(seq_len(NCOL(dat)), id), id)]
   }
 } # /rtemis::set_outcome
+
+
+#' Set positive class
+#'
+#' Checks and sets the positive class for binary classification in a tabular dataset.
+#'
+#' @param x Tabular data, i.e. data.frame, data.table, or tbl_df (tibble): Input dataset. The last column will be treated as the outcome variable.
+#' @param positive_class Character scalar: The name of the positive class. Must be one of the levels of the outcome variable.
+#'
+#' @return Tabular data of the same class as `x`, with the positive class set as the second level of the outcome factor.
+#' @author EDG
+#' @export
+set_positive_class <- function(x, positive_class) {
+  # Check outcome is factor with 2 levels and positive_class is one of them
+  if (!is.factor(outcome(x))) {
+    rtemis.core::abort(
+      "You defined `positive_class`, but the outcome is not a factor.",
+      class = c("rtemis_type_error", "rtemis_input_error")
+    )
+  }
+  if (nlevels(outcome(x)) != 2L) {
+    rtemis.core::abort(
+      "You defined `positive_class`, but the outcome does not have 2 levels.",
+      class = c("rtemis_value_error", "rtemis_input_error")
+    )
+  }
+  if (!positive_class %in% levels(outcome(x))) {
+    rtemis.core::abort(
+      "You defined `positive_class` as '",
+      positive_class,
+      "', but the outcome levels are: ",
+      paste(levels(outcome(x)), collapse = ", "),
+      ".",
+      class = c("rtemis_value_error", "rtemis_input_error")
+    )
+  }
+  if (positive_class == levels(outcome(x))[2L]) {
+    # Already in correct order
+    return(x)
+  }
+  # Reorder factor levels to put positive_class second
+  if (is.data.table(x)) {
+    set(
+      x,
+      j = outcome_name(x),
+      value = factor(
+        outcome(x),
+        levels = c(
+          setdiff(levels(outcome(x)), positive_class),
+          positive_class
+        )
+      )
+    )
+  } else {
+    x[[outcome_name(x)]] <- factor(
+      outcome(x),
+      levels = c(setdiff(levels(outcome(x)), positive_class), positive_class)
+    )
+    x
+  }
+} # /rtemis::set_positive_class
 
 
 #' Make formula
@@ -128,8 +197,6 @@ make_formula <- function(x, output = "character") {
 #' @param include_anova Integer vector {1, 2, 3}: Output ANOVA Type I, II, and/or III
 #' p-vals. Type I uses base R `anova()` (sequential); Types II and III use `car::Anova()`.
 #' NA to skip.
-#' @param info Logical: If TRUE, warn when values < than machine eps are replaced by
-#' machine eps
 #'
 #' @return `data.table` with glm summaries
 #' @author EDG
@@ -137,7 +204,7 @@ make_formula <- function(x, output = "character") {
 #' @keywords internal
 #' @noRd
 
-glm2table <- function(x, xnames = NULL, include_anova = NA, info = TRUE) {
+glm2table <- function(x, xnames = NULL, include_anova = NA) {
   if (is.null(xnames)) {
     xnames <- if (!is.null(names(x))) {
       names(x)
@@ -299,7 +366,10 @@ get_gam_pvals <- function(m, warn = TRUE) {
 #' class_imbalance(x)
 class_imbalance <- function(x) {
   if (!is.factor(x)) {
-    cli::cli_abort("Input must be a factor")
+    rtemis.core::abort(
+      "Input must be a factor.",
+      class = c("rtemis_type_error", "rtemis_input_error")
+    )
   }
   K <- nlevels(x)
   N <- length(x)
@@ -311,7 +381,7 @@ class_imbalance <- function(x) {
 
 # expand_grid.R
 # ::rtemis::
-# 2025 EDG rtemis.org
+# 2025- EDG rtemis.org
 
 #' Expand Grid
 #'

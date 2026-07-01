@@ -1,6 +1,6 @@
 # calibrate.R
 # ::rtemis::
-# 2025 EDG rtemis.org
+# 2025- EDG rtemis.org
 
 # %% calibrate.Classification ----
 #' Calibrate Binary Classification Models
@@ -136,7 +136,10 @@ method(calibrate, ClassificationRes) <- function(
 
   # Check IFW is FALSE
   if (!is.null(hyperparameters) && hyperparameters[["ifw"]]) {
-    cli::cli_abort("IFW must be FALSE for proper calibration.")
+    rtemis.core::abort(
+      "IFW must be FALSE for proper calibration.",
+      class = c("rtemis_value_error", "rtemis_input_error")
+    )
   }
 
   # Calibration models

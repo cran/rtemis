@@ -5,6 +5,12 @@
 # Key
 # {Algorithm}[method]<Class> Further conditions
 
+# Note
+# We are using very small and simple datasets to reduce runtime.
+# GLM models are expected to give warnings, including:
+#   - "glm.fit: fitted probabilities numerically 0 or 1 occurred"
+#   - "glm.fit: algorithm did not converge"
+
 # %% Packages ----
 library(data.table)
 
@@ -263,8 +269,6 @@ test_that("train() GLMNET Multiclass Classification succeeds", {
 
 # --- GAM ------------------------------------------------------------------------------------------
 ## {GAM}[train]<Regression> spline & parametric ----
-hyperparameters <- setup_GAM()
-hyperparameters
 mod_r_gam <- train(
   x = datr_train,
   dat_test = datr_test,
@@ -852,7 +856,8 @@ mod_r_lightrlft_l1l2 <- train(
   hyperparameters = setup_LightRuleFit(
     nrounds = 50L,
     lambda_l1 = 10,
-    lambda_l2 = 10
+    lambda_l2 = 10,
+    lambda = 0.01
   )
 )
 
@@ -872,7 +877,8 @@ test_that("train() LightRuleFit Regression with l1, l2 params passed", {
 mod_c_lightrlft <- train(
   x = datc2_train,
   dat_test = datc2_test,
-  hyperparameters = setup_LightRuleFit(nrounds = 50L)
+  hyperparameters = setup_LightRuleFit(nrounds = 50L),
+  execution_config = setup_ExecutionConfig(backend = "none")
 )
 test_that("train() LightRuleFit Binary Classification succeeds", {
   expect_s7_class(mod_c_lightrlft, Classification)

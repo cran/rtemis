@@ -8,7 +8,7 @@
 #' "KFold" creates stratified folds, , "StratSub" creates stratified subsamples,
 #' "Bootstrap" gives the standard bootstrap, i.e. random sampling with replacement,
 #' while "StratBoot" uses StratSub and then randomly duplicates some of the training cases to
-#' reach original length of input (default) or length defined by `target_length`.
+#' reach the original length of the input, or the length defined by `target_length`.
 #'
 #' Note that option 'KFold' may result in resamples of slightly different length. Avoid all
 #' operations which rely on equal-length vectors. For example, you can't place resamples in a
@@ -234,7 +234,10 @@ kfold <- function(
   max.bins <- length(unique(stratify_var))
   if (max.bins < strat_n_bins) {
     if (max.bins == 1) {
-      cli::cli_abort("Only one unique value present in stratify_var.")
+      rtemis.core::abort(
+        "Only one unique value present in stratify_var.",
+        class = c("rtemis_value_error", "rtemis_input_error")
+      )
     }
     if (verbosity > 0L) {
       msg0("Using max n bins possible = ", max.bins, ".")

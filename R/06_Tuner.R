@@ -29,9 +29,11 @@
 #' @field config Named list of tuner config.
 #'
 #' @author EDG
+#' @keywords internal
 #' @noRd
 TunerConfig <- new_class(
   name = "TunerConfig",
+  package = "rtemis",
   properties = list(
     type = class_character,
     config = class_list
@@ -94,7 +96,7 @@ method(`[[`, TunerConfig) <- function(x, name) {
 
 
 # %% GridSearchConfig ----
-#' @title GridSearchConfig
+#' GridSearchConfig
 #'
 #' @description
 #' TunerConfig subclass for grid search config.
@@ -104,6 +106,7 @@ method(`[[`, TunerConfig) <- function(x, name) {
 GridSearchConfig <- new_class(
   name = "GridSearchConfig",
   parent = TunerConfig,
+  package = "rtemis",
   constructor = function(
     resampler_config = NULL,
     search_type = NULL,
@@ -179,7 +182,10 @@ setup_GridSearch <- function(
   check_inherits(search_type, "character")
   check_float01exc(randomize_p)
   if (search_type == "exhaustive" && !is.null(randomize_p)) {
-    cli::cli_abort("search_type is 'exhaustive': do not set randomize_p.")
+    rtemis.core::abort(
+      "search_type is 'exhaustive': do not set randomize_p.",
+      class = c("rtemis_value_error", "rtemis_input_error")
+    )
   }
   # check_inherits(metrics_aggregate_fn, "function")
   check_character(metrics_aggregate_fn)
@@ -209,6 +215,7 @@ setup_GridSearch <- function(
 #' @noRd
 Tuner <- new_class(
   name = "Tuner",
+  package = "rtemis",
   properties = list(
     type = class_character,
     hyperparameters = Hyperparameters,
@@ -237,6 +244,7 @@ method(desc, Tuner) <- function(x) {
 GridSearch <- new_class(
   name = "GridSearch",
   parent = Tuner,
+  package = "rtemis",
   constructor = function(
     hyperparameters,
     tuner_config,
@@ -302,12 +310,6 @@ method(print, GridSearch) <- function(x, header = TRUE, ...) {
 } # /rtemis::print.GridSearch
 
 
-# %% describe.GridSearch ----
-method(describe, GridSearch) <- function(x) {
-  print(x, header = FALSE)
-}
-
-
 # %% repr.GridSearch ----
 method(repr, GridSearch) <- function(
   x,
@@ -356,21 +358,32 @@ method(repr, GridSearch) <- function(
 } # /rtemis::repr.GridSearch
 
 
-# %% list_to_TunerConfig ----
-#' List to TunerConfig
+# %% .list_to_TunerConfig ----
+#' Convert a list to a TunerConfig object
 #'
-#' Convert a named list to a TunerConfig object. Used by `read_config()`
+#' Internal function used by `rtemis.server` and `SuperConfig` deserialization
+#' to reconstruct a `TunerConfig` object from a named list. Not intended for
+#' direct use by end users.
 #'
-#' @param x Named list with elements "type" and "config".
+#' @param x Named list with two elements:
+#'   \describe{
+#'     \item{`type`}{Character: tuner type. Currently only `"GridSearch"` is
+#'       supported.}
+#'     \item{`config`}{Named list of tuner configuration fields. For
+#'       `"GridSearch"`: `resampler_config` (a list accepted by
+#'       [.list_to_ResamplerConfig()]), `search_type`, `randomize_p`,
+#'       `metrics_aggregate_fn`, `metric`, and `maximize`.}
+#'   }
 #'
-#' @return TunerConfig object.
+#' @return A `TunerConfig` object (currently a `GridSearchConfig`).
 #'
 #' @author EDG
-#' @noRd
-list_to_TunerConfig <- function(x) {
+#' @keywords internal
+#' @export
+.list_to_TunerConfig <- function(x) {
   if (x[["type"]] == "GridSearch") {
     setup_GridSearch(
-      resampler_config = list_to_ResamplerConfig(x[["config"]][[
+      resampler_config = .list_to_ResamplerConfig(x[["config"]][[
         "resampler_config"
       ]]),
       search_type = x[["config"]][["search_type"]],
@@ -380,6 +393,10 @@ list_to_TunerConfig <- function(x) {
       maximize = x[["config"]][["maximize"]]
     )
   } else {
-    cli::cli_abort("Unsupported tuner type: {x[['type']]}")
+    rtemis.core::abort(
+      "Unsupported tuner type: ",
+      x[["type"]],
+      class = "rtemis_unsupported_error"
+    )
   }
-} # /rtemis::list_to_TunerConfig
+} # /rtemis::.list_to_TunerConfig

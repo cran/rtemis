@@ -19,8 +19,8 @@
 #' group names appear in legend
 #'
 #' If `orientation == "h"`, `xlab` is applied to y-axis and vice versa.
-#' Similarly, `x.axist.type` applies to y-axis - this defaults to
-#' "category" and would not normally need changing.
+#' Similarly, `xaxis_type` applies to the y-axis - the "category" type would
+#' not normally need changing.
 #'
 #' @param x Vector or List of vectors: Input
 #' @param time Date or date-time vector
@@ -40,12 +40,12 @@
 #' @param plot_bg Color: Background color for plot area.
 #' @param theme `Theme` object.
 #' @param palette Character vector: Colors to use.
-#' @param quartilemethod Character: "linear", "exclusive", "inclusive"
+#' @param quartilemethod Character: "linear", "exclusive", "inclusive".
+#' See <https://plotly.com/r/box-plots/#choosing-the-algorithm-for-computing-quartiles>.
 #' @param xlim Numeric vector: x-axis limits
 #' @param ylim Numeric vector: y-axis limits
-#' @param boxpoints Character or FALSE: "all", "suspectedoutliers", "outliers"
-#' See <https://plotly.com/r/box-plots/#choosing-the-algorithm-for-computing-quartiles>
-#' @param xnames Character, vector, length = NROW(x): x-axis names. Default = NULL, which
+#' @param boxpoints Character or FALSE: "all", "suspectedoutliers", "outliers".
+#' @param xnames Character, vector, length = NROW(x): x-axis names. If NULL,
 #' tries to set names automatically.
 #' @param group_lines Logical: If TRUE, add separating lines between groups of
 #' boxplots
@@ -58,8 +58,7 @@
 #' @param font_size  Float: Font size for all labels.
 #' @param ylab_standoff Numeric: Standoff for y-axis label
 #' @param legend Logical: If TRUE, draw legend.
-#' @param legend_col Color: Legend text color. Default = NULL, determined by
-#' the theme.
+#' @param legend_col Color: Legend text color. If NULL, determined by the theme.
 #' @param legend_xy Float, vector, length 2: Relative x, y position for legend.
 #' @param xaxis_type Character: "linear", "log", "date", "category",
 #' "multicategory"
@@ -104,10 +103,10 @@
 #' @param starbracket_pad Numeric: Padding for htest annotation brackets
 #' @param use_plotly_group If TRUE, use plotly's `group` arg to group
 #' boxes.
-#' @param width Numeric: Force plot size to this width. Default = NULL, i.e. fill
-#' available space
-#' @param height Numeric: Force plot size to this height. Default = NULL, i.e. fill
-#' available space
+#' @param width Numeric: Force plot size to this width. If NULL, fill
+#' available space.
+#' @param height Numeric: Force plot size to this height. If NULL, fill
+#' available space.
 #' @param displayModeBar Logical: If TRUE, show plotly's modebar
 #' @param filename Character: Path to file to save static plot.
 #' @param modeBar_file_format Character: "svg", "png", "jpeg", "pdf"
@@ -247,7 +246,10 @@ draw_box <- function(
   }
   nvars <- length(x)
   if (nvars > 1 && !is.null(group) && !is.null(time)) {
-    cli::cli_abort("Better use subplot for each variable")
+    rtemis.core::abort(
+      "Better use subplot for each variable.",
+      class = c("rtemis_value_error", "rtemis_input_error")
+    )
   }
   horizontal <- orientation == "h"
 
@@ -257,7 +259,10 @@ draw_box <- function(
     } else if (x_transform == "minmax") {
       x <- lapply(x, drange)
     } else {
-      cli::cli_abort("Unsupported x_transform specified")
+      rtemis.core::abort(
+        "Unsupported x_transform specified.",
+        class = c("rtemis_value_error", "rtemis_input_error")
+      )
     }
   }
 
@@ -276,7 +281,10 @@ draw_box <- function(
         xnames <- xnames[.order]
       }
     } else {
-      cli::cli_abort("Cannot use `order_by_fn` with `time`")
+      rtemis.core::abort(
+        "Cannot use `order_by_fn` with `time`.",
+        class = c("rtemis_value_error", "rtemis_input_error")
+      )
     }
   }
 

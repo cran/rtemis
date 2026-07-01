@@ -1,6 +1,6 @@
 # tune.R
 # ::rtemis::
-# 2025 EDG rtemis.org
+# 2025- EDG rtemis.org
 
 # %% get_tuner_fn ----
 #' Get Tuner Function
@@ -25,6 +25,8 @@ get_tuner_fn <- function(type = "GridSearch") {
 #' @param tuner_config `TunerConfig` object: created with [setup_GridSearch].
 #' @param preprocessor_config Optional `PreprocessorConfig` object: created with
 #' [setup_Preprocessor].
+#' @param decomposition_config Optional `DecompositionConfig` object: created with a
+#' decomposition `setup_*` function.
 #' @param weights Numeric vector: Optional case weights.
 #' @param verbosity Integer: Verbosity level.
 #'
@@ -36,11 +38,13 @@ tune <- function(
   hyperparameters,
   tuner_config,
   preprocessor_config = NULL,
+  decomposition_config = NULL,
   weights = NULL,
   verbosity = 1L,
   backend = "none",
   future_plan = "multicore",
-  n_workers = 1L
+  n_workers = 1L,
+  on_error = "continue"
 ) {
   check_is_S7(hyperparameters, Hyperparameters)
   check_is_S7(tuner_config, TunerConfig)
@@ -52,13 +56,19 @@ tune <- function(
       hyperparameters = hyperparameters,
       tuner_config = tuner_config,
       preprocessor_config = preprocessor_config,
+      decomposition_config = decomposition_config,
       weights = weights,
       verbosity = verbosity,
       backend = backend,
       future_plan = future_plan,
-      n_workers = n_workers
+      n_workers = n_workers,
+      on_error = on_error
     )
   } else {
-    cli::cli_abort("Unsupported tuner type: {tuner_config@type}")
+    rtemis.core::abort(
+      "Unsupported tuner type: ",
+      tuner_config@type,
+      class = "rtemis_unsupported_error"
+    )
   }
 } # /rtemis::tune

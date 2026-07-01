@@ -13,9 +13,9 @@ massGLM(x, y, scale_y = NULL, center_y = NULL, verbosity = 1L)
 GLM for each column of \code{y}. Usually a large number of features.}
 
 \item{scale_y}{Logical: If TRUE, scale each column of \code{y} to have mean 0 and sd 1. If \code{NULL},
-defaults to TRUE if \code{y} is numeric, FALSE otherwise.}
+set to TRUE if \code{y} is numeric, FALSE otherwise.}
 
-\item{center_y}{Logical: If TRUE, center each column of \code{y} to have mean 0. If \code{NULL}, defaults
+\item{center_y}{Logical: If TRUE, center each column of \code{y} to have mean 0. If \code{NULL}, set
 to TRUE if \code{scale_y} is TRUE, FALSE otherwise.}
 
 \item{verbosity}{Integer: Verbosity level.}
@@ -31,7 +31,8 @@ set.seed(2022)
 y <- rnormmat(500, 40, return_df = TRUE)
 x <- data.frame(
   x1 = y[[3]] - y[[5]] + y[[14]] + rnorm(500),
-  x2 = y[[21]] + rnorm(500)
+  x2 = y[[21]] + rnorm(500),
+  g = factor(sample(letters[1:3], 500, replace = TRUE))
 )
 massmod <- massGLM(x, y)
 # Print table of coefficients, p-values, etc. for all models

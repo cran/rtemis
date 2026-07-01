@@ -27,11 +27,9 @@ method(train_, IsotonicHyperparameters) <- function(
   x,
   weights = NULL,
   dat_validation = NULL,
+  execution_config = setup_ExecutionConfig(),
   verbosity = 1L
 ) {
-  # Checks ----
-  check_is_S7(hyperparameters, IsotonicHyperparameters)
-
   # Data ----
   check_supervised(
     x = x,
@@ -39,18 +37,27 @@ method(train_, IsotonicHyperparameters) <- function(
     verbosity = verbosity
   )
   if (NCOL(x) > 2) {
-    cli::cli_abort("Isotonic requires a single predictor.")
+    rtemis.core::abort(
+      "Isotonic requires a single predictor.",
+      class = c("rtemis_dim_error", "rtemis_data_error")
+    )
   }
 
   if (!is.null(weights)) {
-    cli::cli_abort("Isotonic does not support weights.")
+    rtemis.core::abort(
+      "Isotonic does not support weights.",
+      class = "rtemis_unsupported_error"
+    )
   }
 
   type <- supervised_type(x)
   if (type == "Classification") {
     n_classes <- nlevels(outcome(x))
     if (n_classes > 2L) {
-      cli::cli_abort("Isotonic does not support multiclass classification")
+      rtemis.core::abort(
+        "Isotonic does not support multiclass classification.",
+        class = "rtemis_unsupported_error"
+      )
     }
     # Assuming binclasspos = 2L
     y <- as.numeric(x[[2]]) - 1
@@ -77,7 +84,12 @@ method(train_, IsotonicHyperparameters) <- function(
 #' @author EDG
 #' @keywords internal
 #' @noRd
-method(predict_super, class_stepfun) <- function(model, newdata, type = NULL) {
+method(predict_super, class_stepfun) <- function(
+  model,
+  newdata,
+  type = NULL,
+  verbosity = 0L
+) {
   model(newdata[[1]])
 } # /rtemis::predict_super.class_stepfun
 
@@ -90,5 +102,5 @@ method(predict_super, class_stepfun) <- function(model, newdata, type = NULL) {
 #' @keywords internal
 #' @noRd
 method(varimp_super, class_stepfun) <- function(model) {
-  NA
+  NULL
 } # /rtemis::varimp_super.class_stepfun

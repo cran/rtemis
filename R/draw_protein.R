@@ -27,7 +27,7 @@
 #' @param main_yref Character: yref for title.
 #' @param main_xanchor Character: xanchor for title.
 #' @param main_yanchor Character: yanchor for title.
-#' @param layout Character: "1curve", "grid": type of layout to use.
+#' @param layout Character: "simple", "grid", "1curve", "2curve": type of layout to use.
 #' @param show_markers Logical: If TRUE, show amino acid markers.
 #' @param show_labels Logical: If TRUE, annotate amino acids with elements.
 #' @param font_size Integer: Font size for labels.
@@ -98,7 +98,7 @@
 #' @param automargin_x Logical: If TRUE, use automatic margin for x axis.
 #' @param automargin_y Logical: If TRUE, use automatic margin for y axis.
 #' @param xaxis_autorange Logical: If TRUE, use automatic range for x axis.
-#' @param yaxis_autorange Character: If TRUE, use automatic range for y axis.
+#' @param yaxis_autorange Logical: If TRUE, use automatic range for y axis.
 #' @param scaleanchor_y Character: Scale anchor for y axis.
 #' @param scaleratio_y Numeric: Scale ratio for y axis.
 #' @param hoverlabel_align Character: Alignment for hover label.
@@ -675,7 +675,7 @@ draw_protein <- function(
   # Note: Do not show both PTMs and cleavage sites using the same padding
   if (!is.null(ptm)) {
     if (verbosity > 1L) {
-      msg_info("Adding PTM markers...")
+      info("Adding PTM markers...")
     }
     if (is.null(ptm_col)) {
       ptm_col <- 1 + seq_along(ptm)
@@ -704,7 +704,7 @@ draw_protein <- function(
   # Note: Do not show both PTMs and cleavage sites using the same padding
   if (!is.null(cleavage_site)) {
     if (verbosity > 1L) {
-      msg_info("Adding cleavage site markers...")
+      info("Adding cleavage site markers...")
     }
     if (is.null(clv_col)) {
       clv_col <- c(

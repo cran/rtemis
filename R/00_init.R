@@ -6,6 +6,7 @@
 # S7 generics: https://rconsortium.github.io/S7/articles/generics-methods.html
 
 # %% --- S3 Classes for S7 ----------------------------------------------------------------------------
+class_table <- new_S3_class("table")
 class_data.table <- new_S3_class("data.table")
 class_lgb.Booster <- new_S3_class("lgb.Booster")
 # All internal methods should support data.frame, data.table, tbl_df
@@ -24,16 +25,22 @@ class_tabnet_fit <- new_S3_class("tabnet_fit")
 
 # %% --- Generics -------------------------------------------------------------------------------------
 # %% repr ----
-#' String representation
+
+# %% get_varimp ----
+#' Get variable importance
 #'
-#' @param x rtemis object.
+#' @param x `Supervised` or `SupervisedRes` object.
+#' @param ... Additional arguments passed to methods.
 #'
-#' @return Character string representation of the object.
+#' @return `VariableImportance` object or list of `VariableImportance` objects.
 #'
 #' @author EDG
-#' @keywords internal
-#' @noRd
-repr <- new_generic("repr", "x")
+#' @export
+#'
+#' @examples
+#' mod <- train(iris, algorithm = "LightRF")
+#' get_varimp(mod)
+get_varimp <- new_generic("get_varimp", "x")
 
 
 # %% inspect ----
@@ -130,8 +137,8 @@ train_ <- new_generic(
     x,
     weights = NULL,
     dat_validation = NULL,
-    verbosity = 1L,
-    ...
+    execution_config = setup_ExecutionConfig(),
+    verbosity = 1L
   ) {
     S7_dispatch()
   }
@@ -158,7 +165,7 @@ train_ <- new_generic(
 predict_super <- new_generic(
   "predict_super",
   "model",
-  function(model, newdata, type = NULL, ...) {
+  function(model, newdata, type = NULL, verbosity = 0L) {
     S7_dispatch()
   }
 ) # /rtemis::predict_super
@@ -228,6 +235,24 @@ decomp_ <- new_generic(
     S7_dispatch()
   }
 ) # /rtemis::decomp_
+
+
+# %% apply_decomp_ ----
+#' Generic for applying a fitted decomposition to new data
+#'
+#' Dispatches on the `DecompositionConfig` subclass. Implemented only for
+#' algorithms listed in `decom_algorithms_applicable`.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+apply_decomp_ <- new_generic(
+  "apply_decomp_",
+  "config",
+  function(config, decom, new_data, verbosity = 1L) {
+    S7_dispatch()
+  }
+) # /rtemis::apply_decomp_
 
 
 # %% cluster_ ----
@@ -395,23 +420,42 @@ plot_manhattan <- new_generic("plot_manhattan", "x")
 
 
 # %% describe ----
-#' Describe rtemis object
+#' Describe object
 #'
-#' @description
-#' This generic is used to provide a description of an rtemis object in plain language.
+#' @param x R object to describe. See method documentation for supported classes.
+#' @param verbosity Integer: Verbosity level.
+#' @param ... Additional arguments passed to methods.
 #'
-#' @param x `Supervised` or `SupervisedRes` object or list of such objects.
-#' @param ... Not used.
-#'
-#' @return A character string describing the object.
+#' @details
+#' Extra arguments for `factor` method:
+#' - `max_n`: Integer: Return counts for up to this many levels.
+#' - `return_ordered`: Logical: If TRUE, return levels ordered by count, otherwise return in level order.
+#' - `verbosity`: Integer: Verbosity level.
 #'
 #' @author EDG
 #' @export
 #'
 #' @examples
+#' # --- For `Supervised` objects ---
 #' species_lightrf <- train(iris, algorithm = "lightrf")
 #' describe(species_lightrf)
-describe <- new_generic("describe", "x")
+#'
+#' # --- For `SupervisedRes` objects ---
+#' mod <- train(iris, algorithm = "CART", outer_resampling_config = setup_Resampler())
+#' describe(mod)
+#'
+#' # --- For factors ---
+#' # Small number of levels
+#' describe(iris[["Species"]])
+#'
+#' # Large number of levels: show top n by count
+#' x <- factor(sample(letters, 1000, TRUE))
+#' describe(x)
+#' describe(x, 3)
+#' describe(x, 3, return_ordered = FALSE)
+describe <- new_generic("describe", "x", function(x, verbosity = 1L, ...) {
+  S7_dispatch()
+})
 
 
 # %% present ----
@@ -506,41 +550,74 @@ method(get_factor_levels, class_data.table) <- function(x) {
 to_html <- new_generic("to_html", "x")
 
 
-# %% to_toml ----
-#' Convert to TOML
+# %% to_json ----
+#' Convert to JSON-serializable list
+#'
+#' Convert an rtemis S7 object to a named list suitable for
+#' `jsonlite::toJSON(auto_unbox = TRUE)`. Used by the rtemislive backend
+#' to send structured results to the browser frontend without scraping
+#' R console output.
+#'
+#' Each output list includes a `.class` field equal to the most specific
+#' S7 class name, allowing the frontend to dispatch to a class-specific
+#' renderer.
+#'
+#' The default method walks `props(x)`, recursing into S7-typed properties
+#' and passing through primitive properties as-is. Per-class methods
+#' override where the default isn't appropriate (e.g. classes whose props
+#' include a `data.table`, an opaque model fit, or where some props should
+#' be excluded for size or relevance reasons).
+#'
+#' @param x rtemis S7 object.
+#' @param ... Additional arguments passed to method.
+#'
+#' @return Named list. Pass through `jsonlite::toJSON(auto_unbox = TRUE)`
+#' for serialization.
 #'
 #' @author EDG
 #' @keywords internal
-#' @noRd
-to_toml <- new_generic("to_toml", "x")
-
-
-# %% to_yaml ----
-#' Convert to YAML
-#'
-#' @author EDG
-#' @keywords internal
-#' @noRd
-to_yaml <- new_generic("to_yaml", "x")
-
-
-# %% write_toml ----
-#' @name
-#' write_toml
-#'
-#' @title
-#' Write to TOML file
-#'
-#' @author EDG
 #' @export
-# examples include in method documentation
-write_toml <- new_generic(
-  "write_toml",
-  "x",
-  function(x, file, overwrite = FALSE, verbosity = 1L) {
-    S7_dispatch()
+to_json <- new_generic("to_json", "x")
+
+
+# %% to_json default ----
+#' @name to_json
+#' @keywords internal
+#' @noRd
+method(to_json, S7_object) <- function(x, ...) {
+  ps <- props(x)
+  body <- lapply(ps, .to_json_value)
+  c(list(.class = S7_class(x)@name), body)
+} # /rtemis::to_json.S7_object
+
+
+#' Recursively convert a value to a JSON-serializable form
+#'
+#' Handles the common composite shapes encountered when walking S7 props:
+#' nested S7 objects (recurse via the generic), lists that may *contain*
+#' S7 objects (recurse element-wise), and primitives / data.frames
+#' (pass through — jsonlite supports them natively).
+#'
+#' @param v Value from an S7 property.
+#'
+#' @return JSON-serializable value.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+.to_json_value <- function(v) {
+  if (is.null(v)) {
+    return(NULL)
   }
-) # /rtemis::write_toml
+  if (S7_inherits(v)) {
+    return(to_json(v))
+  }
+  # data.frame / data.table are list-like but jsonlite handles them natively.
+  if (is.list(v) && !is.data.frame(v)) {
+    return(lapply(v, .to_json_value))
+  }
+  v
+} # /rtemis::.to_json_value
 
 
 # %% inc ----
@@ -693,17 +770,59 @@ features <- new_generic("features", "x", function(x) {
 
 method(features, class_data.frame) <- function(x) {
   if (NCOL(x) < 2) {
-    cli::cli_abort("Input must have at least 2 columns.")
+    rtemis.core::abort(
+      "Input must have at least 2 columns.",
+      class = c("rtemis_dim_error", "rtemis_data_error")
+    )
   }
   x[, -NCOL(x), drop = FALSE]
 }
 
 method(features, class_data.table) <- function(x) {
   if (NCOL(x) < 2) {
-    cli::cli_abort("Input must have at least 2 columns.")
+    rtemis.core::abort(
+      "Input must have at least 2 columns.",
+      class = c("rtemis_dim_error", "rtemis_data_error")
+    )
   }
   x[, -NCOL(x), with = FALSE]
 } # /rtemis::features.class_data.table
+
+
+# %% numeric_features ----
+#' Get numeric features from tabular data
+#'
+#' Returns the numeric columns among the features (all columns except the last).
+#'
+#' @details
+#' Mirrors [features()]: by \pkg{rtemis} convention the last column is the outcome
+#' variable and all other columns are features. This drops the outcome, then keeps
+#' the numeric features (both double and integer). Useful, for example, to feed only
+#' the continuous features to a decomposition: `decomp(numeric_features(iris), ...)`.
+#'
+#' @param x tabular data: Input data to get numeric features from.
+#'
+#' @return Object of the same class as the input, containing only the numeric
+#' feature columns.
+#'
+#' @author EDG
+#' @export
+#'
+#' @examples
+#' numeric_features(iris) |> head()
+numeric_features <- new_generic("numeric_features", "x", function(x) {
+  S7_dispatch()
+}) # /rtemis::numeric_features
+
+method(numeric_features, class_data.frame) <- function(x) {
+  feat <- features(x)
+  feat[, vapply(feat, is.numeric, logical(1L)), drop = FALSE]
+}
+
+method(numeric_features, class_data.table) <- function(x) {
+  feat <- features(x)
+  feat[, vapply(feat, is.numeric, logical(1L)), with = FALSE]
+} # /rtemis::numeric_features.class_data.table
 
 
 # %% feature_names ----
@@ -731,7 +850,10 @@ feature_names <- new_generic("feature_names", "x", function(x) {
 
 method(feature_names, class_data.frame) <- function(x) {
   if (NCOL(x) < 2) {
-    cli::cli_abort("Input must have at least 2 columns.")
+    rtemis.core::abort(
+      "Input must have at least 2 columns.",
+      class = c("rtemis_dim_error", "rtemis_data_error")
+    )
   }
   names(x)[-NCOL(x)]
 } # /rtemis::feature_names.class_data.frame
@@ -1050,38 +1172,6 @@ preprocessed <- new_generic("preprocessed", "x", function(x) {
 
 
 # --- Internal functions ---------------------------------------------------------------------------
-#' Get output type
-#'
-#' Get output type for printing text.
-#'
-#' @param output_type Character {"ansi", "html", or "plain"}: Output type.
-#' @param filename Character: Filename for output.
-#'
-#' @return Character with selected output type.
-#'
-#' @author EDG
-#'
-#' @keywords internal
-#' @noRd
-get_output_type <- function(
-  output_type = c("ansi", "html", "plain"),
-  filename = NULL
-) {
-  if (!is.null(filename)) {
-    return("plain")
-  }
-
-  if (is.null(output_type)) {
-    if (interactive()) {
-      return("ansi")
-    } else {
-      return("plain")
-    }
-  }
-
-  match.arg(output_type)
-} # /rtemis::get_output_type
-
 
 # %% S7_to_list ----
 S7_to_list <- function(x) {
@@ -1093,30 +1183,6 @@ S7_to_list <- function(x) {
   }
   x
 } # /rtemis::S7_to_list
-
-
-# %% toml_empty_to_null ----
-toml_empty_to_null <- function(x) {
-  if (!is.list(x)) {
-    return(x)
-  }
-  if (length(x) == 0L) {
-    return(NULL)
-  }
-  if (is.null(names(x))) {
-    scalar_types <- vapply(
-      x,
-      function(el) {
-        is.atomic(el) && length(el) == 1L && !is.null(el)
-      },
-      logical(1)
-    )
-    if (all(scalar_types)) {
-      return(unlist(x, use.names = FALSE))
-    }
-  }
-  lapply(x, toml_empty_to_null)
-} # /rtemis::toml_empty_to_null
 
 
 # %% write_lines ----
@@ -1147,8 +1213,11 @@ write_lines <- function(x, file, overwrite = FALSE, verbosity = 1L) {
         ))
       }
     } else {
-      cli::cli_abort(
-        "File already exists: {file}. Set `overwrite = TRUE` to overwrite."
+      rtemis.core::abort(
+        "File already exists: ",
+        file,
+        ". Set `overwrite = TRUE` to overwrite.",
+        class = c("rtemis_file_exists", "rtemis_io_error")
       )
     }
   }
@@ -1158,7 +1227,11 @@ write_lines <- function(x, file, overwrite = FALSE, verbosity = 1L) {
   if (!dir.exists(dir)) {
     dir.create(dir, recursive = TRUE)
     if (!dir.exists(dir)) {
-      cli::cli_abort("Failed to create directory: {dir}")
+      rtemis.core::abort(
+        "Failed to create directory: ",
+        dir,
+        class = "rtemis_io_error"
+      )
     } else {
       if (verbosity >= 1L) {
         msg(checkmark(), "Created directory:", dir)
@@ -1169,7 +1242,11 @@ write_lines <- function(x, file, overwrite = FALSE, verbosity = 1L) {
   writeLines(x, con = file)
   # Check if file was created successfully
   if (!file.exists(file)) {
-    cli::cli_abort("Failed to create file: {file}")
+    rtemis.core::abort(
+      "Failed to create file: ",
+      file,
+      class = "rtemis_io_error"
+    )
   } else {
     if (verbosity >= 1L) {
       msg(checkmark(), "Created file:", file)
@@ -1179,75 +1256,17 @@ write_lines <- function(x, file, overwrite = FALSE, verbosity = 1L) {
 } # /rtemis::write_lines
 
 
-# %% toml_meta ----
-#' @name
-#' toml_meta
-#'
-#' @title
-#' Write TOML metadata
-#'
-#' @description
-#' Creates named list which will become first TOML table in the following format:
-#'
-#' ```toml
-#' [_meta]
-#' package = "rtemis"
-#' package_version = "0.4.2"
-#' schema_version = "1.0"
-#' object_type = "SuperConfig"
-#' created_at = 2026-2-11T22:45:00Z
-#' ```
-#' @param x Object to create metadata for. Class name will be included in metadata.
-#' @param schema_version Character: Version of the schema to include in metadata.
-#'
-#' @return Named list containing metadata.
-#'
-#' @author EDG
-#' @keywords internal
-#' @noRd
-toml_meta <- function(x, schema_version = "1.0") {
-  list(
-    `_meta` = list(
-      package = "rtemis",
-      package_version = as.character(packageVersion("rtemis")),
-      schema_version = schema_version,
-      object_type = S7_class(x)@name,
-      created_at = format(
-        Sys.time(),
-        "%Y-%m-%dT%H:%M:%SZ",
-        tz = "UTC"
-      )
+# %% coming up in rtemis.core
+collapse_head <- function(x, maxlength = 6L, format_fn = identity) {
+  if (maxlength == -1L || length(x) <= maxlength) {
+    paste(format_fn(x), collapse = ", ")
+  } else {
+    paste0(
+      paste(
+        format_fn(utils::head(as.vector(x), n = maxlength)),
+        collapse = ", "
+      ),
+      ", ..."
     )
-  )
-} # /rtemis::toml_meta
-
-
-# %% toml_with_meta ----
-#' Create TOML string with metadata
-#'
-#' Creates a TOML string with an inline metadata table followed by the TOML representation of the
-#' object.
-#'
-#' @param x Object to convert to TOML. Class name will be included in metadata.
-#'
-#'
-#' @return Character string containing TOML representation of the object, with metadata included as
-#' an inline table at the top.
-#'
-#' @author EDG
-#' @keywords internal
-#' @noRd
-toml_with_meta <- function(x, payload, schema_version = "1.0") {
-  meta_block <- toml::write_toml(
-    toml_meta(x, schema_version = schema_version)
-  )
-  meta_lines <- strsplit(meta_block, "\n", fixed = TRUE)[[1]]
-  meta_lines <- meta_lines[meta_lines != "" & meta_lines != "[_meta]"]
-  meta_inline <- paste0(
-    "_meta = { ",
-    paste(meta_lines, collapse = ", "),
-    " }"
-  )
-  payload_str <- toml::write_toml(payload)
-  paste(meta_inline, payload_str, sep = "\n\n")
-} # /rtemis::toml_with_meta
+  }
+}

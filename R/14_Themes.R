@@ -1,6 +1,6 @@
 # S7_Themes.R
 # ::rtemis::
-# 2025 EDG rtemis.org
+# 2025- EDG rtemis.org
 
 # %% Theme ----
 #' Theme
@@ -12,6 +12,7 @@
 #' @noRd
 Theme <- new_class(
   name = "Theme",
+  package = "rtemis",
   properties = list(
     name = class_character,
     config = class_list
@@ -66,12 +67,6 @@ method(`[[`, Theme) <- function(x, name) {
 #'
 #' @author EDG
 #' @noRd
-names.Theme <- function(x) {
-  names(x@config)
-} # /rtemis::names.Theme
-
-
-# %% names.Theme method ----
 method(names, Theme) <- function(x) {
-  names.Theme(x)
+  names(x@config)
 } # /rtemis::names.Theme

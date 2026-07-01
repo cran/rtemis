@@ -1,6 +1,6 @@
 # utils_exec.Ranger
 # ::rtemis::
-# 2025 EDG rtemis.org
+# 2025- EDG rtemis.org
 
 #' Do call with tryCatch and suggestion
 #'
@@ -21,7 +21,6 @@ do_call <- function(
   error_pattern_suggestion = NULL,
   warning_pattern_suggestion = NULL
 ) {
-  call <- parent.frame(n = 1L)
   common_errors <- list(
     "object '(.*)' not found" = "Check that the object exists and is spelled correctly.",
     "object of type 'closure' is not subsettable" = "Check that the object is a list or data.frame."
@@ -59,7 +58,10 @@ do_call <- function(
           ))
           if (length(idi) > 0) {
             for (i in idi) {
-              cat(orange(warn_pat_sug[[i]], "\n"))
+              cat(fmt(
+                paste0(warn_pat_sug[[i]], "\n"),
+                col = rtemis_colors[["orange"]]
+              ))
             }
           }
           invokeRestart("muffleWarning")
@@ -74,16 +76,17 @@ do_call <- function(
         suggestions <- sapply(idi, function(i) err_pat_sug[[i]])
         errmsg <- paste0(
           red(errmsg),
-          orange(
+          fmt(
             paste0(
               bold("\nSuggestion:\n  "),
               paste0(suggestions, collapse = "\n  ")
-            )
+            ),
+            col = rtemis_colors[["orange"]]
           )
         )
       }
       cat("\n")
-      cli::cli_abort(errmsg, call = call)
+      rtemis.core::abort(errmsg, class = "rtemis_runtime_error", parent = e)
     } # /error
   ) # /tryCatch
 } # /rtemis::do_call

@@ -1573,7 +1573,7 @@ rtCol2 <- c(
   ucsfCol[["A3_CTA_Blue"]]
 )
 
-rtms <- c(
+rtms1 <- c(
   teal = ucsfCol[["C3_Teal"]],
   orange = ucsfCol[["M3_Orange"]],
   red = pennCol[["lighterRed"]],
@@ -1584,6 +1584,20 @@ rtms <- c(
   lighter_blue = ucsfCol[["A3_CTA_Blue"]]
 ) |>
   desaturate()
+
+rtms <- c(
+  teal = rtemis_colors[["teal"]],
+  red = rtemis_colors[["red"]],
+  blue = rtemis_colors[["blue"]],
+  orange = rtemis_colors[["orange"]],
+  magenta = rtemis_colors[["magenta"]],
+  light_blue = rtemis_colors[["light_blue"]],
+  green = rtemis_colors[["green"]],
+  light_orange = rtemis_colors[["light_orange"]],
+  pink = rtemis_colors[["pink"]],
+  purple = rtemis_colors[["purple"]],
+  dark_magenta = rtemis_colors[["dark_magenta"]]
+)
 
 rtcoldev <- c(
   rtemisblue = "#80ffff",
@@ -1703,7 +1717,7 @@ rtemis_palettes <- list(
 #' Each palette is a named list of hexadecimal color definitions which can be used with
 #' any graphics function.
 #'
-#' @param palette Character: Name of palette to return. Default = NULL: available palette
+#' @param palette Character: Name of palette to return. If NULL, available palette
 #' names are printed and no palette is returned.
 #' @param verbosity Integer: Verbosity level.
 #'

@@ -8,8 +8,8 @@
 #' @param y data.frame or similar: Each column is a different outcome. The function will train one
 #' GLM for each column of `y`. Usually a large number of features.
 #' @param scale_y Logical: If TRUE, scale each column of `y` to have mean 0 and sd 1. If `NULL`,
-#' defaults to TRUE if `y` is numeric, FALSE otherwise.
-#' @param center_y Logical: If TRUE, center each column of `y` to have mean 0. If `NULL`, defaults
+#' set to TRUE if `y` is numeric, FALSE otherwise.
+#' @param center_y Logical: If TRUE, center each column of `y` to have mean 0. If `NULL`, set
 #' to TRUE if `scale_y` is TRUE, FALSE otherwise.
 # @param include_anova Logical: If TRUE, include ANOVA results in the summary.
 #' @param verbosity Integer: Verbosity level.
@@ -24,7 +24,8 @@
 #' y <- rnormmat(500, 40, return_df = TRUE)
 #' x <- data.frame(
 #'   x1 = y[[3]] - y[[5]] + y[[14]] + rnorm(500),
-#'   x2 = y[[21]] + rnorm(500)
+#'   x2 = y[[21]] + rnorm(500),
+#'   g = factor(sample(letters[1:3], 500, replace = TRUE))
 #' )
 #' massmod <- massGLM(x, y)
 #' # Print table of coefficients, p-values, etc. for all models
@@ -34,7 +35,6 @@ massGLM <- function(
   y,
   scale_y = NULL,
   center_y = NULL,
-  # include_anova = TRUE,
   verbosity = 1L
 ) {
   # Init ----
@@ -46,20 +46,27 @@ massGLM <- function(
   if (y_class[1] == "numeric") {
     # Check all are numeric
     if (!all(y_class == "numeric")) {
-      cli::cli_abort(
-        "All columns of y must be the same type: either numeric or factors with 2 levels"
+      rtemis.core::abort(
+        "All columns of y must be the same type: either numeric or factors with 2 levels.",
+        class = "rtemis_data_error"
       )
     }
     .family <- "gaussian"
   } else if (y_class[1] == "factor") {
     n_levels <- sapply(y, nlevels)
     if (!all(n_levels == 2)) {
-      cli::cli_abort("All factor columns of y must have 2 levels")
+      rtemis.core::abort(
+        "All factor columns of y must have 2 levels.",
+        class = "rtemis_data_error"
+      )
     }
     .family <- "binomial"
   } else {
-    cli::cli_abort(
-      "All columns of y must be either numeric or factors with 2 levels. Found: {.val {y_class}}"
+    rtemis.core::abort(
+      "All columns of y must be either numeric or factors with 2 levels. Found: ",
+      paste(y_class, collapse = ", "),
+      ".",
+      class = "rtemis_data_error"
     )
   }
 
@@ -103,18 +110,17 @@ massGLM <- function(
   }
 
   # Fit models ----
-  if (verbosity > 0L) {
-    msg(
-      "Fitting",
-      highlight(length(ynames)),
-      "GLMs of family",
-      bold(.family),
-      "with",
-      highlight(length(xnames)),
-      ngettext(length(xnames), "predictor", "predictors"),
-      "each..."
-    )
-  }
+  msg(
+    "Fitting",
+    highlight(length(ynames)),
+    "GLMs of family",
+    bold(.family),
+    "with",
+    highlight(length(xnames)),
+    ngettext(length(xnames), "predictor", "predictors"),
+    "each...",
+    verbosity = verbosity
+  )
   tbls <- lapply(
     cli::cli_progress_along(seq_along(y), name = "GLMs", type = "tasks"),
     function(i) {
@@ -127,10 +133,13 @@ massGLM <- function(
   # ynames should be the same as tbl[["Variable"]]
   # <> Check in MassGLM constructor
   if (!all(ynames == tbl[["Variable"]])) {
-    cli::cli_warn(c(
-      "The names of the outcome variables in y ({.val ynames}) do not match the names in the summary table ({.val summary[['Variable']]})",
-      "Check the summary table."
-    ))
+    rtemis.core::warn(
+      "The names of the outcome variables in y (",
+      collapse_head(ynames),
+      ") do not match the names in the summary table (",
+      collapse_head(tbl[["Variable"]]),
+      "). Check the summary table."
+    )
   }
   outro(start_time)
   MassGLM(

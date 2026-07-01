@@ -5,6 +5,23 @@
 # Notes:
 # Some algorithms do not work with variable names containing dots (SparkML)
 
+# %% check_numeric_or_factor() ----
+check_numeric_or_factor <- function(x) {
+  # check all columns are either numeric or factor and report any that are not
+  non_numeric_or_factor <- which(
+    !vapply(x, function(col) is.numeric(col) || is.factor(col), logical(1L))
+  )
+  if (length(non_numeric_or_factor) > 0) {
+    rtemis.core::abort(
+      "Columns ",
+      paste0(names(x)[non_numeric_or_factor], collapse = ", "),
+      " are not numeric or factor.",
+      class = c("rtemis_data_error", "rtemis_input_error")
+    )
+  }
+}
+
+
 # %% check_factor_levels.class_data.frame ----
 method(check_factor_levels, class_data.frame) <- function(x, y, z) {
   if (!is.null(y) || !is.null(z)) {
@@ -17,8 +34,9 @@ method(check_factor_levels, class_data.frame) <- function(x, y, z) {
           identical(x_levels[[i]], y_levels[[i]])
         }))
       ) {
-        cli::cli_abort(
-          "Training and validation set factor levels do not match."
+        rtemis.core::abort(
+          "Training and validation set factor levels do not match.",
+          class = c("rtemis_level_mismatch", "rtemis_data_error")
         )
       }
     }
@@ -29,7 +47,10 @@ method(check_factor_levels, class_data.frame) <- function(x, y, z) {
           identical(x_levels[[i]], z_levels[[i]])
         }))
       ) {
-        cli::cli_abort("Training and test set factor levels do not match.")
+        rtemis.core::abort(
+          "Training and test set factor levels do not match.",
+          class = c("rtemis_level_mismatch", "rtemis_data_error")
+        )
       }
     }
   }
@@ -47,8 +68,9 @@ method(check_factor_levels, class_data.table) <- function(x, y, z) {
           identical(x_levels[[i]], y_levels[[i]])
         }))
       ) {
-        cli::cli_abort(
-          "Training and validation set factor levels do not match."
+        rtemis.core::abort(
+          "Training and validation set factor levels do not match.",
+          class = c("rtemis_level_mismatch", "rtemis_data_error")
         )
       }
     }
@@ -59,7 +81,10 @@ method(check_factor_levels, class_data.table) <- function(x, y, z) {
           identical(x_levels[[i]], z_levels[[i]])
         }))
       ) {
-        cli::cli_abort("Training and test set factor levels do not match.")
+        rtemis.core::abort(
+          "Training and test set factor levels do not match.",
+          class = c("rtemis_level_mismatch", "rtemis_data_error")
+        )
       }
     }
   }
@@ -92,7 +117,7 @@ check_supervised <- function(
   allow_missing = TRUE,
   verbosity = 1L
 ) {
-  # if (upsample && downsample) cli::cli_abort("Only one of upsample and downsample can be TRUE")
+  # if (upsample && downsample) rtemis.core::abort("Only one of upsample and downsample can be TRUE")
 
   if (verbosity > 0L) {
     msgstart("Checking data is ready for training...")
@@ -111,44 +136,67 @@ check_supervised <- function(
   ncols <- NCOL(x)
   # Since one column must be outcome, need min of 2 columns
   if (ncols < 2) {
-    cli::cli_abort("Data must contain at least 1 feature and 1 outcome column.")
+    rtemis.core::abort(
+      "Data must contain at least 1 feature and 1 outcome column.",
+      class = c("rtemis_dim_error", "rtemis_data_error")
+    )
   }
   if (!is.null(dat_validation)) {
     if (NCOL(dat_validation) != ncols) {
-      cli::cli_abort(
-        "\nValidation set must contain same number of columns as training set."
+      rtemis.core::abort(
+        "Validation set must contain same number of columns as training set.",
+        class = c("rtemis_dim_error", "rtemis_data_error")
       )
     }
   }
   if (!is.null(dat_test)) {
     if (NCOL(dat_test) != ncols) {
-      cli::cli_abort(
-        "Test set must contain same number of columns as training set."
+      rtemis.core::abort(
+        "Test set must contain same number of columns as training set.",
+        class = c("rtemis_dim_error", "rtemis_data_error")
       )
     }
   }
 
+  # Check for non-numeric or factor features ----
+  check_numeric_or_factor(features(x))
+
   # Missing values ----
   if (anyNA(outcome(x))) {
-    cli::cli_abort("Training set outcome cannot contain any missing values.")
+    rtemis.core::abort(
+      "Training set outcome cannot contain any missing values.",
+      class = c("rtemis_missing_data", "rtemis_data_error")
+    )
   }
   if (!allow_missing && anyNA(x)) {
-    cli::cli_abort("Data should not contain missing values.")
+    rtemis.core::abort(
+      "Data should not contain missing values.",
+      class = c("rtemis_missing_data", "rtemis_data_error")
+    )
   }
 
   # Outcome class ----
   outcome_class <- class(x[[ncols]])
   if (!outcome_class %in% c("integer", "numeric", "factor")) {
-    cli::cli_abort("Outcome must be integer, numeric, or factor.")
+    rtemis.core::abort(
+      "Outcome must be integer, numeric, or factor.",
+      class = c("rtemis_outcome_error", "rtemis_data_error")
+    )
   }
   if (!is.null(dat_validation)) {
     if (class(dat_validation[[ncols]]) != outcome_class) {
-      cli::cli_abort("Training and validation outcome must be of same class.")
+      rtemis.core::abort(
+        "Training and validation outcome must be of same class.",
+        class = c("rtemis_outcome_error", "rtemis_data_error")
+      )
     }
   }
   if (!is.null(dat_test)) {
     if (class(dat_test[[ncols]]) != outcome_class) {
-      cli::cli_abort("Training and test outcome must be of same class.")
+      rtemis.core::abort(
+        "Training and test outcome must be of same class.",
+        class = c("rtemis_outcome_error", "rtemis_data_error")
+      )
     }
   }
 
@@ -167,7 +215,7 @@ check_supervised <- function(
 #' Check data ahead of unsupervised learning
 #'
 #' @param x Data frame: Features for unsupervised learning.
-#' @param allow_missing Logical: If TRUE, allow missing values in the data. Default is FALSE.
+#' @param allow_missing Logical: If TRUE, allow missing values in the data.
 #'
 #' @return NULL, invisibly. Stops execution if checks fail.
 #'
@@ -182,13 +230,22 @@ check_unsupervised_data <- function(x, allow_missing = FALSE, verbosity = 1L) {
     msgstart("Checking unsupervised data...")
   }
   if (NCOL(x) < 2) {
-    cli::cli_abort("Data must contain at least 2 columns.")
+    rtemis.core::abort(
+      "Data must contain at least 2 columns.",
+      class = c("rtemis_dim_error", "rtemis_data_error")
+    )
   }
   if (any(sapply(x, function(x) !is.numeric(x)))) {
-    cli::cli_abort("All columns must be numeric.")
+    rtemis.core::abort(
+      "All columns must be numeric.",
+      class = "rtemis_data_error"
+    )
   }
   if (!allow_missing && anyNA(x)) {
-    cli::cli_abort("Data should not contain missing values.")
+    rtemis.core::abort(
+      "Data should not contain missing values.",
+      class = c("rtemis_missing_data", "rtemis_data_error")
+    )
   }
   if (verbosity > 0L) {
     msgdone()

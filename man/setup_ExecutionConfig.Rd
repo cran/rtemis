@@ -7,16 +7,23 @@
 setup_ExecutionConfig(
   backend = c("future", "mirai", "none"),
   n_workers = NULL,
-  future_plan = NULL
+  future_plan = NULL,
+  on_error = c("continue", "stop", "stop_outer")
 )
 }
 \arguments{
 \item{backend}{Character: Execution backend: "future", "mirai", or "none".}
 
-\item{n_workers}{Integer: Number of workers for parallel execution. Only used if \verb{backend is "future"} or "mirai". Do not rely on the default value, set to an appropriate number depending
+\item{n_workers}{Integer: Number of workers for parallel execution. Only used if \verb{backend is "future"} or "mirai". Set this to an appropriate number depending
 on your system.}
 
 \item{future_plan}{Character: Future plan to use if \code{backend} is "future".}
+
+\item{on_error}{Character \{"continue", "stop", "stop_outer"\}: Failure policy.
+\code{"continue"} makes grid cells and unscorable hyperparameter combinations
+non-fatal (recorded, warned, and excluded), failing only when nothing is scorable or
+the final model fails; \code{"stop"} aborts on any error; \code{"stop_outer"} tolerates grid-cell
+failures but aborts on an outer-fold failure.}
 }
 \value{
 \code{ExecutionConfig} object.

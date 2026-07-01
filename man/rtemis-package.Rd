@@ -10,7 +10,7 @@ Advanced Machine Learning & Visualization made efficient, accessible, reproducib
 }
 \section{Online Documentation and Vignettes}{
 
-\url{https://docs.rtemis.org/r/}
+\url{https://docs.rtemis.org/r/ml}
 }
 
 \section{System Setup}{
@@ -78,17 +78,28 @@ For example, some optimized \code{data.table} operations that perform in-place m
 work with \code{data.table} objects.
 }
 
+\section{Error Conditions}{
+
+Errors are signalled as classed conditions that can be handled with
+\code{\link[=tryCatch]{tryCatch()}}. See \link{rtemis_conditions} for the class hierarchy.
+}
+
 \seealso{
 Useful links:
 \itemize{
   \item \url{https://www.rtemis.org}
-  \item \url{https://docs.rtemis.org/r/}
-  \item \url{https://docs.rtemis.org/r-api/}
+  \item \url{https://docs.rtemis.org/r/ml}
+  \item \url{https://docs.rtemis.org/r/ml-api/}
   \item Report bugs at \url{https://github.com/rtemis-org/rtemis/issues}
 }
 
 }
 \author{
 \strong{Maintainer}: E.D. Gennatas \email{gennatas@gmail.com} (\href{https://orcid.org/0000-0001-9280-3609}{ORCID}) [copyright holder]
+
+Authors:
+\itemize{
+  \item E.D. Gennatas \email{gennatas@gmail.com} (\href{https://orcid.org/0000-0001-9280-3609}{ORCID}) [copyright holder]
+}
 
 }

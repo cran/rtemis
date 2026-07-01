@@ -162,8 +162,8 @@ pkglogo <- function(
   filename = paste0(pkg, ".utf8"),
   fmt_fn = color_txt_columns,
   args = list(
-    color_left = kaimana_red,
-    color_right = coastside_orange,
+    color_left = rtemis_colors[["red"]],
+    color_right = rtemis_colors[["orange"]],
     output_type = "ansi"
   ),
   pad = 2L
@@ -343,6 +343,10 @@ show_col <- function(
           )
 
           paste0(
+            light_block,
+            light_block,
+            medium_block,
+            medium_block,
             solid_block,
             solid_block,
             medium_block,

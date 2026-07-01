@@ -7,8 +7,8 @@
 #' @param x `ClassificationMetrics` object produced by [classification_metrics] or confusion matrix
 #' where rows are the reference and columns are the estimated classes. For binary classification,
 #' the first row and column are the positive class.
-#' @param xlab Character: x-axis label. Default is "Predicted".
-#' @param ylab Character: y-axis label. Default is "Reference".
+#' @param xlab Character: x-axis label.
+#' @param ylab Character: y-axis label.
 #' @param true_col Color for true positives & true negatives.
 #' @param false_col Color for false positives & false negatives.
 #' @param font_size Integer: font size.
@@ -17,10 +17,10 @@
 #' @param main_yanchor Character: y anchor of the title.
 #' @param theme `Theme` object.
 #' @param margin List: Plot margins.
-#' @param filename Character: file name to save the plot. Default is NULL.
-#' @param file_width Numeric: width of the file. Default is 500.
-#' @param file_height Numeric: height of the file. Default is 500.
-#' @param file_scale Numeric: scale of the file. Default is 1.
+#' @param filename Character: file name to save the plot.
+#' @param file_width Numeric: width of the file.
+#' @param file_height Numeric: height of the file.
+#' @param file_scale Numeric: scale of the file.
 #'
 #' @return `plotly` object.
 #'
@@ -54,11 +54,14 @@ draw_confusion <- function(
 ) {
   # Input ----
   if (S7_inherits(x, ClassificationMetrics)) {
-    x <- x@metrics[["Confusion_Matrix"]]
+    x <- x@confusion_matrix
   }
 
   if (is.null(dim(x)) || ncol(x) != nrow(x)) {
-    cli::cli_abort("The confusion matrix must be a square matrix.")
+    rtemis.core::abort(
+      "The confusion matrix must be a square matrix.",
+      class = c("rtemis_dim_error", "rtemis_data_error")
+    )
   }
 
   # Metrics ----
@@ -72,7 +75,7 @@ draw_confusion <- function(
   class_sensitivity <- hits / class_totals
   true_negative <- total - predicted_totals - (class_totals - hits)
   class_specificity <- true_negative / condition_negative
-  class_balancedAccuracy <- .5 * (class_sensitivity + class_specificity)
+  class_balanced_accuracy <- .5 * (class_sensitivity + class_specificity)
   # PPV = true positive / predicted condition positive
   class_ppv <- hits / predicted_totals
   # NPV  = true negative / predicted condition negative
@@ -422,8 +425,8 @@ draw_confusion <- function(
   ba_pad <- ifelse(nclasses == 2, 0.15, 0.2)
   ba <- ifelse(
     nclasses == 2,
-    class_balancedAccuracy[1],
-    mean(class_balancedAccuracy)
+    class_balanced_accuracy[1],
+    mean(class_balanced_accuracy)
   )
   plt <- plotly::add_annotations(
     plt,

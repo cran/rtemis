@@ -1,6 +1,6 @@
 # present.R
 # ::rtemis::
-# 2025 EDG rtemis.org
+# 2025- EDG rtemis.org
 
 #' Present list of Supervised or SupervisedRes objects
 #'
@@ -22,7 +22,7 @@
 #' @return plotly object
 #'
 #' @author EDG
-#' @export
+#' @noRd
 #'
 #' @examples
 #' \dontrun{
@@ -36,9 +36,9 @@
 #'   algorithm = "radialsvm",
 #'   outer_resampling_config = setup_Resampler(seed = 2026)
 #' )
-#' present(list(iris_lightrf, iris_rsvm), metric = "Balanced_Accuracy")
+#' present(list(iris_lightrf, iris_rsvm), metric = "balanced_accuracy")
 #' }
-present.list <- function(
+method(present, class_list) <- function(
   x,
   metric = NULL,
   model_names = NULL,
@@ -60,15 +60,19 @@ present.list <- function(
   }))
 
   if (!(all_supervised || all_supervisedres)) {
-    cli::cli_abort(
-      "Input must be a list of Supervised or SupervisedRes objects."
+    rtemis.core::abort(
+      "Input must be a list of Supervised or SupervisedRes objects.",
+      class = c("rtemis_type_error", "rtemis_input_error")
     )
   }
 
   # Check all models are of the same type
   type <- unique(sapply(x, function(m) m@type))
   if (length(type) > 1) {
-    cli::cli_abort("All models must be of the same type")
+    rtemis.core::abort(
+      "All models must be of the same type.",
+      class = c("rtemis_value_error", "rtemis_input_error")
+    )
   }
 
   # Describe
@@ -92,8 +96,8 @@ present.list <- function(
   if (is.null(metric)) {
     metric <- switch(
       type,
-      Classification = "Balanced_Accuracy",
-      Regression = "Rsq"
+      Classification = "balanced_accuracy",
+      Regression = "rsq"
     )
   }
 
@@ -156,5 +160,3 @@ present.list <- function(
   }
   plt
 } # /rtemis::present.list
-
-method(present, class_list) <- present.list

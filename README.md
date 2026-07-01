@@ -1,8 +1,10 @@
+[![CRAN status](https://www.r-pkg.org/badges/version/rtemis)](https://CRAN.R-project.org/package=rtemis)
+[![r-universe](https://rtemis-org.r-universe.dev/badges/rtemis)](https://rtemis-org.r-universe.dev/rtemis)
 [![R-CMD-check](https://github.com/rtemis-org/rtemis/actions/workflows/R-CMD-check.yaml/badge.svg)](https://github.com/rtemis-org/rtemis/actions/workflows/R-CMD-check.yaml)
 
 # rtemis: Advanced Machine Learning &amp; Visualization.
 
-[![rtemis cover](https://docs.rtemis.org/r/assets/docs-cover.avif)](https://docs.rtemis.org/r/)
+[![rtemis cover](https://www.rtemis.org/rtemis-cover.avif)](https://docs.rtemis.org/r/ml/)
 
 This is the new version of the rtemis R package and remains under active development.
 
@@ -16,28 +18,40 @@ The new version (0.99+) features:
 
 ![rtemis v1.0.0 console ascii](https://www.rtemis.org/rtemis-splash.webp)
 
-## Installation of rtemis
+## Installation
 
-Using `pak` from GitHub:
+### From CRAN
+
+```{r}
+pak::pak("rtemis")
+```
+
+or
+
+```r
+install.packages("rtemis")
+```
+
+### Latest version from GitHub
 
 ```r
 pak::pak("rtemis-org/rtemis")
 ```
 
-Using `install.packages` from `r-universe`:
+### Latest version from `r-universe`
+
+```r
+pak::repo_add(rtemis_universe = "https://rtemis-org.r-universe.dev")
+pak::pak("rtemis")
+```
+
+or using `install.packages`:
 
 ```r
 install.packages(
   'rtemis',
   repos = c('https://rtemis-org.r-universe.dev', 'https://cloud.r-project.org')
 )
-```
-
-Using `pak` from `r-universe`:
-
-```r
-pak::repo_add(myuniverse = "https://rtemis-org.r-universe.dev")
-pak::pak("rtemis")
 ```
 
 ## Installation of dependencies
@@ -88,7 +102,7 @@ The following will perform hyperparameter tuning and 10-fold cross-validation.
 It will train `(3*3*2*5 + 1) * 25 = 2275` models total (!).
 
 ```r
-mod <- train(
+mod_lightgbm <- train(
   dat,
   hyperparameters = setup_LightGBM(
         num_leaves = 2^(1:3),
@@ -105,7 +119,7 @@ mod <- train(
 ## Clustering
 
 ```r
-clust <- cluster(
+clust_cmeans <- cluster(
   dat,
   config = setup_CMeans(k = 4L)
 )
@@ -114,7 +128,7 @@ clust <- cluster(
 ## Decomposition
 
 ```r
-decomp <- decompose(
+decomp_ica <- decomp(
   dat,
   config = setup_ICA(k = 12L)
 )
@@ -134,7 +148,7 @@ The new release includes the `draw` family of functions, the evolution of the `d
 
 ## Documentation
 
-The documentation is available at [docs.rtemis.org/r](https://docs.rtemis.org/r/), which includes
+The documentation is available at [docs.rtemis.org/r/ml](https://docs.rtemis.org/r/ml), which includes
 walkthroughs of main features and full API reference.
 
 ## Ongoing work
@@ -144,3 +158,8 @@ There is a lot more coming - both within this package and the other packages in 
 ## rtemisalpha
 
 The original, unmaintained version of rtemis remains available as `rtemisalpha` at [rtemis-org/rtemis-legacy](https://github.com/rtemis-org/rtemis-legacy).
+
+---
+
+© 2016–2026 E.D. Gennatas. Licensed under [GPL (>= 3)](https://www.gnu.org/licenses/gpl-3.0.html).
+

@@ -32,8 +32,8 @@ show_range <- function(x, ddSci = TRUE, decimal_places = 1, na.rm = TRUE) {
 #'   By default normalizes to 0-1 range.
 #'
 #' @param x Numeric vector or matrix / data frame: Input
-#' @param lo Target range minimum. Defaults to 0
-#' @param hi Target range maximum. Defaults to 1
+#' @param lo Target range minimum.
+#' @param hi Target range maximum.
 #' @param byCol Logical: If TRUE: if `x` is matrix, `drange` each
 #' column separately
 #'
@@ -415,7 +415,7 @@ runifmat <- function(
 #' rtversion()
 rtversion <- function() {
   out <- c(
-    list(rtemis_version = as.character(packageVersion("rtemis"))),
+    list(rtemis_version = as.character(utils::packageVersion("rtemis"))),
     as.list(Sys.info())
   )
   printls(out, print_class = FALSE)
@@ -481,8 +481,11 @@ init_project_dir <- function(path, output_dir = "Out", verbosity = 1L) {
       if (verbosity > 0L) {
         nay()
       }
-      cli::cli_abort(
-        "Failed to create project directory at {.file {path}}. Check path & permissions."
+      rtemis.core::abort(
+        "Failed to create project directory at `",
+        path,
+        "`. Check path & permissions.",
+        class = "rtemis_io_error"
       )
     }
   }
@@ -493,7 +496,7 @@ init_project_dir <- function(path, output_dir = "Out", verbosity = 1L) {
   cat("<rtemis Project>\n")
   cat("Initialized: ", datetime(), "\n", sep = "")
   cat("--------------------------------\n")
-  print(sessionInfo())
+  print(utils::sessionInfo())
   sink()
 
   # Directories: /R /Data /output_dir ----
@@ -510,7 +513,13 @@ init_project_dir <- function(path, output_dir = "Out", verbosity = 1L) {
         if (verbosity > 0L) nay()
       }
     } else {
-      if (verbosity > 0L) cat(orange(" Already present\n", bold = TRUE))
+      if (verbosity > 0L) {
+        cat(fmt(
+          " Already present\n",
+          col = rtemis_colors[["orange"]],
+          bold = TRUE
+        ))
+      }
     }
   }
   if (verbosity > 0L) {

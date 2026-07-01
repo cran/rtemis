@@ -8,7 +8,7 @@
 #' Advanced Machine Learning & Visualization made efficient, accessible, reproducible
 #'
 #' @section Online Documentation and Vignettes:
-#' <https://docs.rtemis.org/r/>
+#' <https://docs.rtemis.org/r/ml>
 #'
 #' @section System Setup:
 #' There are some options you can define in your .Rprofile (usually found in your home directory),
@@ -58,9 +58,16 @@
 #' For example, some optimized `data.table` operations that perform in-place modifications only
 #' work with `data.table` objects.
 #'
+#' @section Error Conditions:
+#' Errors are signalled as classed conditions that can be handled with
+#' [tryCatch()]. See [rtemis_conditions] for the class hierarchy.
+#'
 #' @name rtemis-package
-#' @import stats methods graphics grDevices S7 data.table htmltools
-#' @importFrom utils packageVersion sessionInfo getFromNamespace head tail
+#' @import stats methods graphics S7 data.table htmltools rtemis.core
+# rtemis.core exports `gray()` (colored text); exclude grDevices::gray() to
+# avoid masking it, matching the previous local definition. Use
+# `grDevices::gray()` explicitly where the grayscale palette is needed.
+#' @rawNamespace import(grDevices, except = gray)
 "_PACKAGE"
 
 NULL

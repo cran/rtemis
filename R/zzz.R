@@ -18,9 +18,7 @@ live[["parallelized_learners"]] <- c(
 )
 
 # vars
-rtemis_version <- packageVersion("rtemis")
-cores_available <- parallelly::availableCores()
-cores_to_use <- max(cores_available - 3L, 1L)
+rtemis_version <- utils::packageVersion("rtemis")
 
 # References
 # Unicode emojis: https://www.unicode.org/emoji/charts/full-emoji-list.html
@@ -57,6 +55,7 @@ setup_progress <- function() {
 .onAttach <- function(libname, pkgname) {
   if (interactive()) {
     # setup_progress()
+    ncores <- default_n_workers(omit = 0L)
     vline <- paste0(
       "\n  .:",
       bold(pkgname),
@@ -64,17 +63,22 @@ setup_progress <- function() {
       rtemis_version,
       " \U1F30A",
       " ",
-      sessionInfo()[[2]],
+      utils::sessionInfo()[[2]],
       " (",
-      cores_available,
-      " cores available)\n  "
+      ncores,
+      ngettext(ncores, " core", " cores"),
+      " available)\n  "
     )
     packageStartupMessage(paste0(
       pkglogo(),
       vline,
       fmt_gradient(
-        paste0(rep("\u2500", nchar(vline) - 13L), collapse = ""),
-        colors = c(rt_red, rt_orange, rt_red)
+        paste0(rep("\u2500", nchar(vline) - 14L), collapse = ""),
+        colors = c(
+          rtemis_colors[["red"]],
+          rtemis_colors[["orange"]],
+          rtemis_colors[["red"]]
+        )
       ),
       bold("\n  Defaults"),
       "\n  \u2502   ",
@@ -89,7 +93,7 @@ setup_progress <- function() {
       bold("\n  Resources"),
       "\n  \u2502    ",
       gray("Docs:"),
-      " https://docs.rtemis.org/r/",
+      " https://docs.rtemis.org/r/ml",
       "\n  \u2502 ",
       gray("Learn R:"),
       " https://pdsr.rtemis.org",
@@ -97,7 +101,7 @@ setup_progress <- function() {
       gray("Cite: "),
       rtcitation,
       "\n\n  ",
-      fmt("PSA:", col = rt_red, bold = TRUE),
+      fmt("PSA:", col = rtemis_colors[["red"]], bold = TRUE),
       " Do not throw data at algorithms. Compute responsibly!"
     ))
   } else {
@@ -109,7 +113,7 @@ setup_progress <- function() {
         rtemis_version,
         " \U1F30A",
         " ",
-        sessionInfo()[[2]]
+        utils::sessionInfo()[[2]]
       )
     )
   }

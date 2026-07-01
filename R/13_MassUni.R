@@ -1,17 +1,19 @@
 # S7_MassUni.R
 # ::rtemis::
-# 2025 EDG rtemis.org
+# 2025- EDG rtemis.org
 
 # %% MassGLM ----
-#' @title MassGLM
+#' MassGLM
 #'
 #' @description
 #' Superclass for mass-univariate models.
 #'
 #' @author EDG
+#' @keywords internal
 #' @noRd
 MassGLM <- new_class(
   name = "MassGLM",
+  package = "rtemis",
   properties = list(
     summary = class_data.table,
     ynames = class_character,
@@ -90,7 +92,7 @@ method(print, MassGLM) <- function(x, output_type = NULL, ...) {
 #' @param coefname Character: Name of coefficient to plot. If `NULL`, the first coefficient is used.
 #' @param p_adjust_method Character: "holm", "hochberg", "hommel", "bonferroni", "BH", "BY", "fdr", "none" -
 #' p-value adjustment method.
-#' @param p_transform Function to transform p-values for plotting. Default is `function(x) -log10(x)`.
+#' @param p_transform Function to transform p-values for plotting.
 #' @param xlab Character: x-axis label.
 #' @param ylab Character: y-axis label.
 #' @param theme `Theme` object. Create using one of the `theme_` functions, e.g.
@@ -124,10 +126,14 @@ plot.MassGLM <- method(plot, MassGLM) <- function(
     coefname <- x@coefnames[1]
   }
   if (!coefname %in% x@coefnames) {
-    cli::cli_abort(c(
-      "i" = "{.var coefname} must be one of available coefnames: {.strong {x@coefnames}}",
-      "x" = "You asked for: {.strong {coefname}}"
-    ))
+    rtemis.core::abort(
+      "`coefname` must be one of available coefnames: ",
+      paste(x@coefnames, collapse = ", "),
+      ". You asked for: ",
+      coefname,
+      ".",
+      class = c("rtemis_value_error", "rtemis_input_error")
+    )
   }
   if (verbosity > 0L) {
     msg(
@@ -173,7 +179,7 @@ plot.MassGLM <- method(plot, MassGLM) <- function(
 #' @param coefname Character: Name of coefficient to plot. If `NULL`, the first coefficient is used.
 #' @param p_adjust_method Character: "holm", "hochberg", "hommel", "bonferroni", "BH", "BY", "fdr", "none" -
 #' p-value adjustment method.
-#' @param p_transform Function to transform p-values for plotting. Default is `function(x) -log10(x)`.
+#' @param p_transform Function to transform p-values for plotting.
 #' @param ylab Character: y-axis label.
 #' @param theme `Theme` object.
 #' @param col_pos Character: Color for positive significant coefficients.

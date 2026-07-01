@@ -62,7 +62,12 @@ rt_save <- function(
         sep = ""
       )
     }
-    cli::cli_abort("Error: Saving model to ", outdir, " failed.")
+    rtemis.core::abort(
+      "Saving model to ",
+      outdir,
+      " failed.",
+      class = "rtemis_io_error"
+    )
   }
 } # /rtemis::rt_save
 
@@ -90,7 +95,11 @@ check_files <- function(paths, verbosity = 1L, pad = 0) {
       if (verbosity > 0L) {
         nay(paste(f, red(" not found!")), pad = pad)
       }
-      cli::cli_abort("File not found")
+      rtemis.core::abort(
+        "File not found: ",
+        f,
+        class = c("rtemis_file_not_found", "rtemis_io_error")
+      )
     }
   }
 } # /rtemis::check_files
@@ -102,13 +111,12 @@ check_files <- function(paths, verbosity = 1L, pad = 0) {
 #' including command injection, path traversal, and unauthorized file access.
 #'
 #' @param path Character: File or directory path to sanitize.
-#' @param must_exist Logical: If TRUE, abort if path does not exist. Default = FALSE.
+#' @param must_exist Logical: If TRUE, abort if path does not exist.
 #' @param allowed_base Character: Optional base directory to restrict paths to. If provided,
-#' the normalized path must be within this directory. Default = NULL (no restriction).
+#' the normalized path must be within this directory; if NULL, no restriction.
 #' @param allow_urls Logical: If TRUE, allow URL schemes (http://, https://, etc.).
-#' Default = FALSE.
 #' @param type Character: Expected path type - "file", "directory", or "any". Only checked
-#' if `must_exist = TRUE`. Default = "any".
+#' if `must_exist = TRUE`.
 #'
 #' @return Character: Sanitized and normalized absolute path.
 #'
@@ -133,29 +141,60 @@ sanitize_path <- function(
 ) {
   type <- match.arg(type)
 
-  # Check for NULL or empty
-  if (is.null(path) || length(path) == 0L || nchar(path) == 0L) {
-    cli::cli_abort("Path cannot be NULL or empty.")
+  # Check for NULL, NA, or empty length
+  if (is.null(path) || length(path) == 0L || anyNA(path)) {
+    rtemis.core::abort(
+      "Path cannot be NULL, NA, or empty.",
+      class = c("rtemis_null_input", "rtemis_input_error")
+    )
   }
 
   # Check for multiple paths
   if (length(path) > 1L) {
-    cli::cli_abort("Function accepts a single path. Got {length(path)} paths.")
+    rtemis.core::abort(
+      "Function accepts a single path. Got ",
+      length(path),
+      " paths.",
+      class = c("rtemis_length_error", "rtemis_input_error")
+    )
+  }
+
+  # Check for empty string
+  if (nchar(path) == 0L) {
+    rtemis.core::abort(
+      "Path cannot be empty.",
+      class = c("rtemis_null_input", "rtemis_input_error")
+    )
   }
 
   # Check for null bytes (check if raw bytes contain 0x00)
   if (any(charToRaw(path) == 0L)) {
-    cli::cli_abort("Path contains null byte: {.file {path}}")
+    rtemis.core::abort(
+      "Path contains null byte: `",
+      path,
+      "`",
+      class = c("rtemis_value_error", "rtemis_input_error")
+    )
   }
 
   # Check for pipe character at start (command injection vector)
   if (grepl("^\\s*\\|", path)) {
-    cli::cli_abort("Path cannot start with pipe character: {.file {path}}")
+    rtemis.core::abort(
+      "Path cannot start with pipe character: `",
+      path,
+      "`",
+      class = c("rtemis_value_error", "rtemis_input_error")
+    )
   }
 
   # Check for URL schemes unless explicitly allowed
   if (!allow_urls && grepl("^[a-zA-Z][a-zA-Z0-9+.-]*://", path)) {
-    cli::cli_abort("URL schemes not allowed: {.file {path}}")
+    rtemis.core::abort(
+      "URL schemes not allowed: `",
+      path,
+      "`",
+      class = c("rtemis_value_error", "rtemis_input_error")
+    )
   }
 
   # Normalize to absolute path
@@ -171,8 +210,13 @@ sanitize_path <- function(
     )
     # Check if normalized path starts with allowed base
     if (!startsWith(normalized_path, allowed_base_norm)) {
-      cli::cli_abort(
-        "Path {.file {path}} is outside allowed directory: {.file {allowed_base}}"
+      rtemis.core::abort(
+        "Path `",
+        path,
+        "` is outside allowed directory: `",
+        allowed_base,
+        "`",
+        class = "rtemis_io_error"
       )
     }
   }
@@ -180,15 +224,30 @@ sanitize_path <- function(
   # Check existence and type if required
   if (must_exist) {
     if (!file.exists(normalized_path)) {
-      cli::cli_abort("Path does not exist: {.file {normalized_path}}")
+      rtemis.core::abort(
+        "Path does not exist: `",
+        normalized_path,
+        "`",
+        class = c("rtemis_file_not_found", "rtemis_io_error")
+      )
     }
 
     if (type == "file" && dir.exists(normalized_path)) {
-      cli::cli_abort("Path is not a file: {.file {normalized_path}}")
+      rtemis.core::abort(
+        "Path is not a file: `",
+        normalized_path,
+        "`",
+        class = "rtemis_io_error"
+      )
     }
 
     if (type == "directory" && !dir.exists(normalized_path)) {
-      cli::cli_abort("Path is not a directory: {.file {normalized_path}}")
+      rtemis.core::abort(
+        "Path is not a directory: `",
+        normalized_path,
+        "`",
+        class = "rtemis_io_error"
+      )
     }
   }
 

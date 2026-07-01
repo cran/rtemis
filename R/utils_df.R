@@ -189,7 +189,6 @@ df_nunique_perfeat <- function(x, excludeNA = FALSE) {
 #' @param x data.frame.
 #' @param colname Character: Name of column you want to move.
 #' @param to Integer: Which column position to move the vector to.
-#' Default = `ncol(x)` i.e. the last column.
 #'
 #' @return data.frame
 #'
@@ -200,7 +199,10 @@ df_nunique_perfeat <- function(x, excludeNA = FALSE) {
 #' ir <- df_movecolumn(iris, colname = "Species", to = 1L)
 df_movecolumn <- function(x, colname, to = ncol(x)) {
   if (!is.data.frame(x)) {
-    cli::cli_abort("Input {.arg x} must be a data frame.")
+    rtemis.core::abort(
+      "Input `x` must be a data frame.",
+      class = c("rtemis_type_error", "rtemis_input_error")
+    )
   }
 
   check_character(colname, allow_null = FALSE)
@@ -208,16 +210,29 @@ df_movecolumn <- function(x, colname, to = ncol(x)) {
   to <- clean_int(to)
 
   if (NCOL(x) < 2) {
-    cli::cli_abort("Input data.frame {.arg x} must have at least 2 columns.")
+    rtemis.core::abort(
+      "Input data.frame `x` must have at least 2 columns.",
+      class = c("rtemis_dim_error", "rtemis_data_error")
+    )
   }
 
   if (!(colname %in% names(x))) {
-    cli::cli_abort("Column {.val {colname}} not found in input data frame.")
+    rtemis.core::abort(
+      "Column '",
+      colname,
+      "' not found in input data frame.",
+      class = c("rtemis_value_error", "rtemis_input_error")
+    )
   }
 
   ncols <- ncol(x)
   if (to < 1L || to > ncols) {
-    cli::cli_abort("{.arg to} must be between 1 and {.val {ncols}}.")
+    rtemis.core::abort(
+      "`to` must be between 1 and ",
+      ncols,
+      ".",
+      class = c("rtemis_range_error", "rtemis_input_error")
+    )
   }
 
   xnames <- setdiff(names(x), colname)
@@ -239,7 +254,10 @@ df_movecolumn <- function(x, colname, to = ncol(x)) {
 #' @noRd
 vec2df <- function(x, col_names = NULL) {
   if (!is.vector(x)) {
-    cli::cli_abort("Input must be a vector")
+    rtemis.core::abort(
+      "Input must be a vector.",
+      class = c("rtemis_type_error", "rtemis_input_error")
+    )
   }
   if (!is.null(col_names)) {
     names(x) <- col_names

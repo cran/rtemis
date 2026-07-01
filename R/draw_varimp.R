@@ -9,13 +9,14 @@
 #' A simple `plotly` wrapper to plot horizontal barplots, sorted by value,
 #' which can be used to visualize variable importance, model coefficients, etc.
 #'
-#' @param x Numeric vector: Input.
+#' @param x Numeric vector (or coercible to numeric): Input.
 #' @param names Vector, string: Names of features.
 #' @param main Character: Main title.
 #' @param type Character: "bar" or "line".
 #' @param xlab Character: x-axis label.
 #' @param ylab Character: y-axis label.
-#' @param plot_top Integer: Plot this many top features.
+#' @param plot_top Numeric: Number of top features to plot if > 1, or the
+#' proportion of features to plot if <= 1 (e.g. 1 plots all features).
 #' @param orientation Character: "h" or "v".
 #' @param line_width Numeric: Line width.
 #' @param labelify Logical: If TRUE, labelify feature names.
@@ -101,7 +102,10 @@ draw_varimp <- function(
 
   # Data ----
   if (NCOL(x) > 1 && NROW(x) > 1) {
-    cli::cli_abort("x must be a vector or single row or column")
+    rtemis.core::abort(
+      "x must be a vector or single row or column.",
+      class = c("rtemis_type_error", "rtemis_input_error")
+    )
   }
 
   ## Names ----

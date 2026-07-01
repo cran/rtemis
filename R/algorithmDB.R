@@ -1,6 +1,6 @@
 # algorithmDB.R
 # ::rtemis::
-# 2025 EDG rtemis.org
+# 2025- EDG rtemis.org
 
 # Supervised Learning ----
 supervised_algorithms <- data.frame(rbind(
@@ -54,13 +54,13 @@ get_alg_name <- function(algorithm) {
     tolower(algorithm) == tolower(supervised_algorithms[, 1])
   ]
   if (length(algname) == 0) {
-    cli::cli_abort(algorithm, "Incorrect algorithm specified")
+    rtemis.core::abort(
+      "Incorrect algorithm specified: ",
+      algorithm,
+      class = c("rtemis_value_error", "rtemis_input_error")
+    )
   }
   algname
-}
-
-get_alg_setup <- function(algorithm) {
-  paste0("setup_", get_alg_name(algorithm))
 }
 
 #' Get algorithm description
@@ -78,7 +78,11 @@ desc_alg <- function(algorithm) {
     tolower(algorithm) == tolower(supervised_algorithms[, 1])
   ]
   if (length(algdesc) == 0) {
-    cli::cli_abort(algorithm, "Incorrect algorithm specified")
+    rtemis.core::abort(
+      "Incorrect algorithm specified: ",
+      algorithm,
+      class = c("rtemis_value_error", "rtemis_input_error")
+    )
   }
   algdesc
 } # /rtemis::desc_alg
@@ -122,13 +126,6 @@ get_default_hyperparameters <- function(algorithm, type, ncols) {
 } # /rtemis::get_default_hyperparameters
 
 
-# use e.g. in draw_scatter
-setup_alg <- function(algorithm, ...) {
-  alg_name <- get_alg_name(algorithm)
-  setup_fn <- get_alg_setup(algorithm)
-  do_call(setup_fn, list(...))
-} # /rtemis::setup_alg
-
 # Clustering ----
 clust_algorithms <- data.frame(rbind(
   c("CMeans", "Fuzzy C-means Clustering"),
@@ -150,7 +147,11 @@ get_clust_name <- function(algorithm) {
     tolower(algorithm) == tolower(clust_algorithms[, 1])
   ]
   if (length(clustname) == 0) {
-    cli::cli_abort(algorithm, "Incorrect clustering algorithm specified")
+    rtemis.core::abort(
+      "Incorrect clustering algorithm specified: ",
+      algorithm,
+      class = c("rtemis_value_error", "rtemis_input_error")
+    )
   }
   clustname
 } # /rtemis::get_clust_name
@@ -160,7 +161,11 @@ get_clust_desc <- function(algorithm) {
     tolower(algorithm) == tolower(clust_algorithms[, 1])
   ]
   if (length(clustdesc) == 0) {
-    cli::cli_abort(algorithm, "Incorrect clustering algorithm specified")
+    rtemis.core::abort(
+      "Incorrect clustering algorithm specified: ",
+      algorithm,
+      class = c("rtemis_value_error", "rtemis_input_error")
+    )
   }
   clustdesc
 } # /rtemis::get_clust_desc
@@ -204,7 +209,11 @@ get_decom_name <- function(algorithm) {
     tolower(algorithm) == tolower(decom_algorithms[, 1])
   ]
   if (length(decomname) == 0) {
-    cli::cli_abort(algorithm, "Incorrect decomposition algorithm specified")
+    rtemis.core::abort(
+      "Incorrect decomposition algorithm specified: ",
+      algorithm,
+      class = c("rtemis_value_error", "rtemis_input_error")
+    )
   }
   decomname
 } # /rtemis::get_decom_name
@@ -214,7 +223,11 @@ get_decom_desc <- function(algorithm) {
     tolower(algorithm) == tolower(decom_algorithms[, 1])
   ]
   if (length(decomdesc) == 0) {
-    cli::cli_abort(algorithm, "Incorrect decomposition algorithm specified")
+    rtemis.core::abort(
+      "Incorrect decomposition algorithm specified: ",
+      algorithm,
+      class = c("rtemis_value_error", "rtemis_input_error")
+    )
   }
   decomdesc
 } # /rtemis::get_decom_desc
@@ -243,21 +256,24 @@ get_decom_predict_fn <- function(algorithm) {
 #' @rdname available_algorithms
 #' @aliases available_algorithms
 #'
-#' @return Called for its side effect of printing available algorithms.
+#' @param verbosity Integer: Verbosity level.
+#' @return Named list of algorithm descriptions, invisibly.
 #'
 #' @author EDG
 #' @export
 #'
 #' @examples
 #' available_supervised()
-available_supervised <- function() {
+available_supervised <- function(verbosity = 1L) {
   algs <- structure(
     supervised_algorithms[, 2],
     names = supervised_algorithms[, 1],
     class = "list"
   )
-  printls(algs, print_class = FALSE, limit = -1L)
-  invisible()
+  if (verbosity > 0L) {
+    printls(algs, print_class = FALSE, limit = -1L)
+  }
+  invisible(algs)
 }
 
 #' @rdname available_algorithms
@@ -265,29 +281,34 @@ available_supervised <- function() {
 #'
 #' @examples
 #' available_clustering()
-available_clustering <- function() {
+available_clustering <- function(verbosity = 1L) {
   algs <- structure(
     clust_algorithms[, 2],
     names = clust_algorithms[, 1],
     class = "list"
   )
-  printls(algs, print_class = FALSE, limit = -1L)
-  invisible()
+  if (verbosity > 0L) {
+    printls(algs, print_class = FALSE, limit = -1L)
+  }
+  invisible(algs)
 }
+
 
 #' @rdname available_algorithms
 #' @export
 #'
 #' @examples
 #' available_decomposition()
-available_decomposition <- function() {
+available_decomposition <- function(verbosity = 1L) {
   algs <- structure(
     decom_algorithms[, 2],
     names = decom_algorithms[, 1],
     class = "list"
   )
-  printls(algs, print_class = FALSE, limit = -1L)
-  invisible()
+  if (verbosity > 0L) {
+    printls(algs, print_class = FALSE, limit = -1L)
+  }
+  invisible(algs)
 }
 
 # Draw ----
@@ -324,20 +345,24 @@ colnames(draw_fns) <- c("Function Name", "Description")
 #'
 #' Print available draw functions for visualization.
 #'
-#' @return NULL, invisibly.
+#' @param verbosity Integer: Verbosity level.
+#'
+#' @return Named list of draw function descriptions, invisibly.
 #'
 #' @author EDG
 #' @export
 #'
 #' @examples
 #' available_draw()
-available_draw <- function() {
+available_draw <- function(verbosity = 1L) {
   fns <- structure(
     draw_fns[, 2],
     names = draw_fns[, 1],
     class = "list"
   )
-  cat("Available draw functions:\n")
-  printls(fns, print_class = FALSE, limit = -1L)
-  invisible()
+  if (verbosity > 0L) {
+    cat("Available draw functions:\n")
+    printls(fns, print_class = FALSE, limit = -1L)
+  }
+  invisible(fns)
 } # /rtemis::available_draw

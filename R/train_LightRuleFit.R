@@ -1,6 +1,6 @@
 # train_LightRuleFit.R
 # ::rtemis::
-# 2025 EDG rtemis.org
+# 2025- EDG rtemis.org
 
 # %% train_.LightRuleFitHyperparameters ----
 #' Train a LightRuleFit model
@@ -21,18 +21,19 @@ method(train_, LightRuleFitHyperparameters) <- function(
   x,
   weights = NULL,
   dat_validation = NULL,
+  execution_config = setup_ExecutionConfig(),
   verbosity = 1L
 ) {
   # Dependencies ----
   check_dependencies("lightgbm", "glmnet", "matrixStats", "gsubfn")
 
-  # Checks ----
-  check_is_S7(hyperparameters, LightRuleFitHyperparameters)
-
   # Hyperparameters ----
   # Hyperparameters must be either untunable or frozen by `train`.
   if (needs_tuning(hyperparameters)) {
-    cli::cli_abort("Hyperparameters must be fixed - use train() instead.")
+    rtemis.core::abort(
+      "Hyperparameters must be fixed - use train() instead.",
+      class = c("rtemis_value_error", "rtemis_input_error")
+    )
   }
 
   # Data ----
@@ -67,6 +68,7 @@ method(train_, LightRuleFitHyperparameters) <- function(
     hyperparameters = lgbm_parameters,
     # tuner_config = tuner_config, # ? add tuner_config to LightRuleFitHyperparameters
     outer_resampling_config = NULL,
+    execution_config = execution_config,
     verbosity = verbosity
   )
 
@@ -99,6 +101,7 @@ method(train_, LightRuleFitHyperparameters) <- function(
     dat_rules,
     hyperparameters = lasso_hyperparameters,
     weights = glmnet_weights,
+    execution_config = execution_config,
     verbosity = verbosity
   )
 
@@ -180,7 +183,7 @@ method(predict_super, LightRuleFit) <- function(
   model,
   newdata,
   type = NULL,
-  verbosity = 1L
+  verbosity = 0L
 ) {
   check_inherits(newdata, "data.frame")
 
@@ -212,5 +215,11 @@ method(predict_super, LightRuleFit) <- function(
 #' @keywords internal
 #' @noRd
 method(varimp_super, LightRuleFit) <- function(model) {
-  coef(model@model_glmnet@model)
+  .coef <- coef(model@model_glmnet@model)[-1, , drop = FALSE]
+  VariableImportance(
+    data.table(
+      variable = rownames(.coef),
+      Coefficient = unname(.coef[, 1])
+    )
+  )
 } # /rtemis::varimp_super.LightRuleFit
