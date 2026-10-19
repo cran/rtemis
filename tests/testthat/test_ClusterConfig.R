@@ -41,7 +41,7 @@ test_that("ClusterConfig round-trips through write_config/read_config JSON", {
   xl <- jsonlite::fromJSON(file, simplifyVector = FALSE)
   expect_identical(
     xl[["$schema"]],
-    "https://schema.rtemis.org/cluster/v1/schema.json"
+    "https://schema.rtemis.org/cluster/r/v1/schema.json"
   )
   xtoo <- read_config(file)
   expect_s7_class(xtoo, ClusterConfig)
@@ -50,4 +50,61 @@ test_that("ClusterConfig round-trips through write_config/read_config JSON", {
     xtoo@clustering_config@algorithm,
     x@clustering_config@algorithm
   )
+})
+
+
+# %% write_config keeps number precision ----
+test_that("write_config() writes numbers at full precision", {
+  x <- setup_ClusterConfig(
+    clustering_config = setup_DBSCAN(eps = 0.123456789, approx = 1e-7)
+  )
+  file <- tempfile(fileext = ".json")
+  on.exit(unlink(file))
+  write_config(x, file, verbosity = 0L)
+  xtoo <- read_config(file)
+  expect_identical(xtoo@clustering_config@eps, 0.123456789)
+  expect_identical(xtoo@clustering_config@approx, 1e-7)
+})
+
+
+# %% one place for the algorithm ----
+test_that("a cluster document names its algorithm only inside clustering_config", {
+  expect_false("algorithm" %in% names(ClusterConfig@properties))
+  expect_error(
+    .list_to_ClusterConfig(list(
+      algorithm = "KMeans",
+      clustering_config = list(algorithm = "KMeans", k = 3L)
+    )),
+    class = "rtemis_input_error"
+  )
+  x <- .list_to_ClusterConfig(list(
+    clustering_config = list(
+      algorithm = "KMeans",
+      k = 3L,
+      features = c("a", "b")
+    )
+  ))
+  expect_identical(x@clustering_config@algorithm, "KMeans")
+  expect_identical(x@clustering_config@features, c("a", "b"))
+})
+
+
+# %% execution config ----
+test_that("a cluster document carries its execution config through write and read", {
+  x <- setup_ClusterConfig(
+    clustering_config = setup_KMeans(k = 3L),
+    execution_config = setup_SerialExecution(seed = 5L)
+  )
+  file <- withr::local_tempfile(fileext = ".json")
+  write_config(x, file, verbosity = 0L)
+  xtoo <- read_config(file)
+  expect_s7_class(xtoo@execution_config, SerialExecutionConfig)
+  expect_identical(xtoo@execution_config@seed, 5L)
+})
+
+test_that("a cluster document without an execution config reads with the default", {
+  x <- .list_to_ClusterConfig(list(
+    clustering_config = list(algorithm = "KMeans", k = 3L)
+  ))
+  expect_identical(x@execution_config@backend, "future")
 })

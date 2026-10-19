@@ -1,0 +1,936 @@
+# record.R
+# ::rtemis::
+# 2026- EDG rtemis.org
+
+# Turning a finished run into a record: the values it used, where each one came
+# from, and what produced it.
+#
+# The hard part is `origin`, and what makes it answerable is that a model
+# carries *both* configs -- the input it was given (`@config`) and the resolved
+# one it ran (`@hyperparameters` and friends). Comparing them is observation:
+# a field that changed was changed by the run, and whether it was tuned or
+# derived is decided by the declarations (`tunable`, `tune_on_null`), not by a
+# guess.
+#
+# One thing cannot be observed this way, and the `setup_*()` is the only place
+# it is knowable. Its defaults are applied before `train()` ever sees the
+# config, so "the caller typed `nrounds = 500`" and "500 is the default" arrive
+# identical. A setup function that records which of its arguments were supplied
+# -- `supplied_origins()`, attached by `config_origins<-()` -- states the
+# difference outright. One that does not leaves the old inference to run,
+# comparing against the *declared* default: it reads a caller who supplied the
+# default value as `"default"`, and a convenience default that differs from the
+# class's as `"user"` -- which is what made every `ExecutionConfig` field the
+# caller never chose read as theirs. The value is the same either way, so a
+# replay is unaffected; only the attribution is.
+
+# %% supplied_origins ----
+#' Which of a setup function's arguments the caller supplied
+#'
+#' Called from inside a `setup_*()`. Returns one origin per formal: `"user"` for
+#' an argument the caller named, `"default"` for one the function is left to
+#' fill in.
+#'
+#' This is the half of `origin` nothing downstream can observe. Comparing the
+#' config a run was given against the one it resolved separates `derived` and
+#' `tuned` by observation, but `setup_*()` applies its own defaults before
+#' anything else sees the config, so "the caller asked for `backend = "future"`"
+#' and "`future` is this function's default" arrive identical.
+#' Only the function itself can tell them apart, and only while its own call is
+#' still on the stack.
+#'
+#' Only for a `setup_*()` its caller reaches directly. It reports what *this*
+#' call was told, so wiring it into one that an internal caller fully populates
+#' records that caller's forwarding as the user's choices -- `train()` passes
+#' `outdir = outdir` deliberately, which is why `setup_SuperConfig()` is left to
+#' the comparison. Where an intermediary restates every field, the fix is for
+#' the intermediary to forward only what it was given.
+#'
+#' @return Named character: one of `VALUE_ORIGINS` per formal.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+supplied_origins <- function() {
+  frame <- sys.parent()
+  fn <- sys.function(frame)
+  # `envir` is where the call's `...` is expanded from, and the call is the one
+  # written at the setup function's *call site* -- `train()` forwards its dots
+  # as `setup_FutureExecution(...)`, which cannot be matched against the
+  # formals anywhere else. Left to default, `match.call()` looks in this
+  # helper's caller, finds no dots, and stops. `sys.frame(0)` is the global
+  # environment, so a call made at top level resolves too.
+  supplied <- setdiff(
+    names(match.call(fn, sys.call(frame), envir = sys.frame(sys.parent(2)))),
+    ""
+  )
+  formals_ <- setdiff(names(formals(fn)), "...")
+  stats::setNames(
+    ifelse(formals_ %in% supplied, "user", "default"),
+    formals_
+  )
+} # /rtemis::supplied_origins
+
+
+# %% config_origins ----
+#' Origins a config states about its own fields
+#'
+#' Attached by the `setup_*()` that built the object, read by `config_record()`.
+#' Stored as an attribute: it is bookkeeping *about* the config, and an
+#' attribute stays out of the schema, the wire shape and the record's fields.
+#'
+#' Absent when the object was built some other way, or rebuilt by something that
+#' did not carry it forward. The record then infers from the declared defaults,
+#' as it always did -- a coarser answer, never a wrong one.
+#'
+#' @param x S7 config object, or NULL.
+#'
+#' @return Named character, or NULL when the object states nothing.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+config_origins <- function(x) {
+  if (is.null(x)) NULL else attr(x, "rtemis_origins", exact = TRUE)
+} # /rtemis::config_origins
+
+
+# %% config_origins<- ----
+#' State the origins of a config's fields
+#'
+#' @param x S7 config object.
+#' @param value Named character: one of `VALUE_ORIGINS` per field, as
+#'   `supplied_origins()` returns.
+#'
+#' @return `x`, carrying the origins.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+`config_origins<-` <- function(x, value) {
+  attr(x, "rtemis_origins") <- value
+  x
+} # /rtemis::config_origins<-
+
+
+# %% value_origin ----
+#' Where one value came from
+#'
+#' @param input Value the run was given, or NULL if the field was unset.
+#' @param resolved Value the run used.
+#' @param spec `PropertySpec` for the field, or NULL.
+#' @param state Logical: Whether the field is run state -- written by the run,
+#'   never supplied. Such a field cannot be `"user"` or `"default"`: if it holds
+#'   nothing, the run never got to it.
+#' @param declared Character or NULL: what the config itself says about this
+#'   field, from `config_origins()`. Consulted only where the inference below
+#'   would otherwise run: a value the run *changed* is reported from what was
+#'   observed, whatever the config claimed about it.
+#'
+#' @return Character: one of `VALUE_ORIGINS`.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+value_origin <- function(
+  input,
+  resolved,
+  spec,
+  state = FALSE,
+  declared = NULL
+) {
+  if (state && is.null(resolved)) {
+    # Only a run writes it, and it holds nothing -- so the run never determined
+    # it. `default` would claim a default exists for something no default can
+    # supply.
+    return("unset")
+  }
+  if (state && identical(input, resolved)) {
+    # Run state that already held its value when the run started, as when a
+    # setup function fills it from another setting (LightGBM's `nrounds` from
+    # `force_nrounds`): the setting is the authored choice, and this field
+    # records what the run used.
+    return("derived")
+  }
+  if (!identical(input, resolved)) {
+    # NULL meaning "apply the default for this task type" is a restatement of
+    # what was asked for, not something measured or searched -- so resolving it
+    # is a `default`, however much the value changed.
+    if (!is.null(spec) && spec@default_on_null && is.null(input)) {
+      return("default")
+    }
+    # The run changed it. Which way is a declaration, not a guess: a search
+    # space narrowing to one value, or a NULL that means "determine by tuning",
+    # is tuning; anything else the run worked out from the data.
+    # `input` is a wire value: `config_record()` runs it through `wire_value()`
+    # before comparing, so a search space arrives tagged.
+    searched <- !is.null(spec) &&
+      ((spec@tunable && is_wire_candidates(input)) ||
+        (spec@tune_on_null && is.null(input)))
+    return(if (searched) "tuned" else "derived")
+  }
+  # Unchanged: the run used what it was given. Whether that was chosen or merely
+  # inherited is the one thing nothing here can observe -- so it is stated by
+  # the `setup_*()` that knows, and inferred only when it did not say. The
+  # inference reads a supplied value that happens to equal the default as
+  # `"default"`; a stated origin does not.
+  if (!is.null(declared)) {
+    return(declared)
+  }
+  if (!is.null(spec) && identical(input, spec@default)) "default" else "user"
+} # /rtemis::value_origin
+
+
+# %% config_record ----
+#' The record form of one config object
+#'
+#' Its serialized values, plus an `origin` map saying where each came from.
+#' `origin` covers exactly the fields the record carries, which is what the
+#' generated `record.json` requires.
+#'
+#' @param input S7 config object the run was given, or NULL when the run was
+#'   given none (every value is then the run's own).
+#' @param resolved S7 config object the run used.
+#'
+#' @return Named list: the values, plus `origin`.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+config_record <- function(input, resolved) {
+  cls <- S7_class(resolved)
+  # The fields the *record schema* declares, which is what `origin` must cover:
+  # a family leaf's inherited machinery is subtracted by `S7_to_JSONSchema()`'s
+  # `base`, so it is subtracted here too. For a family, `serializable_props()`
+  # also carries the discriminator and the base's shared fields, which the
+  # dispatcher declares and the leaf record does not.
+  base <- family_base(cls)
+  names_ <- record_names(cls, base)
+  props <- cls@properties
+  # A config-valued property is a record in its own right -- a
+  # `GridSearchConfig` holds a `ResamplerConfig` -- so it is built recursively
+  # and left out of this block's `origin`, which the schema does too: it
+  # carries its own. A *list* of them (a meta learner's `base_learners`) is
+  # published as an array of `$ref`s and gets one record per element, for the
+  # same reason.
+  # A `HyperparameterCandidates` is S7 too, and is none of that: it is the
+  # *value* a tunable property holds, and it travels as the tag `wire_value()`
+  # writes. Recording it as a nested config would publish its R-side field
+  # (`from_vector`) and an `origin` of its own, which the schema's
+  # `{"candidates": [...]}` branch does not admit; drop the property from this
+  # block's `origin`, the one place that reports it was tuned; and defeat
+  # `is_wire_candidates()`, whose exact-names test is what lets `from_wire()`
+  # read the value back.
+  nested <- Filter(
+    function(nm) {
+      value <- prop(resolved, nm)
+      fields <- get_spec_fields(props[[nm]])
+      (!is.null(fields[["target_class"]]) && fields[["container"]] == "none") ||
+        (S7_inherits(value) && !is_candidates(value))
+    },
+    names_
+  )
+  nested_list <- Filter(
+    function(nm) {
+      fields <- get_spec_fields(props[[nm]])
+      (!is.null(fields[["target_class"]]) && fields[["container"]] != "none") ||
+        is_S7_list(prop(resolved, nm))
+    },
+    setdiff(names_, nested)
+  )
+  flat <- setdiff(names_, c(nested, nested_list))
+
+  values <- lapply(flat, function(nm) {
+    S7_to_list(wire_value(prop(resolved, nm), props[[nm]]))
+  })
+  names(values) <- flat
+  # What the input config says about itself, where it says anything: a
+  # `setup_*()` records which of its arguments were supplied, because that is
+  # the one thing a comparison cannot recover.
+  declared <- config_origins(input)
+  # A document has one `origin`, covering every field it carries -- and a
+  # family leaf's block is composed with the base's shared settings by
+  # `nested_record()`, so those settings' origins belong here even though their
+  # *values* are contributed by the dispatcher's half. Without this a record
+  # states `seed: 42` and never says whether the caller chose it.
+  #
+  # `S7_to_JSONSchema()` declares exactly this union in the leaf's record
+  # schema, from the same `family_shared_names()`, so writer and schema cannot
+  # disagree; `test_RecordDocuments.R` validates a real record against it.
+  origin_names <- unique(c(flat, family_shared_origin_names(base)))
+  origin <- lapply(origin_names, function(nm) {
+    prop_def <- props[[nm]]
+    resolved_value <- S7_to_list(wire_value(prop(resolved, nm), prop_def))
+    input_value <- if (is.null(input)) {
+      NULL
+    } else {
+      S7_to_list(wire_value(prop(input, nm), prop_def))
+    }
+    value_origin(
+      input_value,
+      resolved_value,
+      get_spec(prop_def),
+      state = identical(prop_role(prop_def), "state"),
+      declared = if (nm %in% names(declared)) declared[[nm]] else NULL
+    )
+  })
+  names(origin) <- origin_names
+
+  sub <- lapply(nested, function(nm) {
+    nested_record(
+      if (is.null(input)) NULL else prop(input, nm),
+      prop(resolved, nm)
+    )
+  })
+  names(sub) <- nested
+
+  # Each element paired with the element the input held under the same name, so
+  # a library entry the user supplied and one the run added read differently.
+  # Positional pairing would misattribute after an insertion; names are what the
+  # library is keyed by.
+  sub_lists <- lapply(nested_list, function(nm) {
+    given <- if (is.null(input)) NULL else prop(input, nm)
+    resolved_list <- prop(resolved, nm)
+    if (is.null(resolved_list)) {
+      return(NULL)
+    }
+    # Map keys pair resolved entries with their inputs and travel on the wire.
+    # Positional arrays retain their order and carry no names.
+    entries <- names(resolved_list) %||% seq_along(resolved_list)
+    records <- lapply(entries, function(entry) {
+      nested_record(
+        if (is.null(given)) NULL else given[[entry]],
+        resolved_list[[entry]]
+      )
+    })
+    if (identical(get_spec_fields(props[[nm]])[["container"]], "map")) {
+      names(records) <- names(resolved_list) %||% character()
+    }
+    records
+  })
+  names(sub_lists) <- nested_list
+
+  # Declaration order, so a record reads like the class it describes.
+  out <- c(values, sub, sub_lists)[names_]
+  # `origin` reports where each field came from, so a block with no fields
+  # reports nothing. The schema omits it for the same reason -- a leaf whose
+  # settings are all inherited from its family base declares none of its own --
+  # and a record carrying an empty one would not validate against it.
+  if (length(origin) == 0L) {
+    # Named even when empty, so `names()` gives `character(0)` and a caller
+    # comparing field sets needs no special case.
+    names(out) <- names(out) %||% character()
+    return(out)
+  }
+  c(out, list(origin = origin))
+} # /rtemis::config_record
+
+
+# %% is_S7_list ----
+#' Is this a non-empty list whose every element is an S7 object?
+#'
+#' The test for a property published as an array of `$ref`s. Requires *every*
+#' element to be S7: a mixed list is not a shape any schema declares, and
+#' treating it as one would silently drop the non-S7 elements from the record.
+#'
+#' @param x Any value.
+#'
+#' @return Logical.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+is_S7_list <- function(x) {
+  is.list(x) && length(x) > 0L && all(vapply(x, S7_inherits, logical(1L)))
+} # /rtemis::is_S7_list
+
+
+# %% family_base ----
+#' Find the explicitly declared family root in a class's ancestry
+#' @param cls S7 class: Class to inspect.
+#' @return S7 family class, or NULL for an independent document.
+#' @keywords internal
+#' @noRd
+family_base <- function(cls) {
+  roots <- Filter(
+    function(parent) {
+      identical(attr(parent, "rtemis_schema", exact = TRUE)[["role"]], "family")
+    },
+    schema_class_ancestors(cls)
+  )
+  if (length(roots) > 1L) {
+    rtemis.core::abort(
+      "Class ",
+      cls@name,
+      " has more than one schema family root.",
+      class = "rtemis_schema_error"
+    )
+  }
+  if (length(roots)) roots[[1L]] else NULL
+} # /rtemis::family_base
+
+
+# %% record_values ----
+#' The field names a record carries for one config class
+#'
+#' A record keeps every field: an unset one is stated as `null`, so nothing in
+#' it falls back to a reader's defaults.
+#'
+#' It also keeps **run state**, which a config drops. `lambda.min` and the
+#' `nrounds` early stopping settled on are precisely what a record exists to
+#' report -- a config omits them because they are re-derived on read, but a
+#' record is the statement of what a run produced. Left out are constants, the
+#' algorithm implying them; computed views, which are functions of fields
+#' already present; and `r_only` values, which have no wire form at all. The
+#' last two are exactly what `S7_to_JSONSchema()` omits from the generated
+#' schema, and a record that carried them would fail its own document, every
+#' record schema being `additionalProperties: false`.
+#'
+#' @param cls S7 class.
+#' @param base S7 class or NULL: the family base, whose properties a leaf
+#'   record does not declare.
+#'
+#' @return Character vector, in declaration order.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+record_names <- function(cls, base) {
+  names_ <- if (is.null(base)) {
+    names(cls@properties)
+  } else {
+    own_prop_names(cls, base)
+  }
+  keep <- Filter(
+    function(nm) {
+      prop <- cls@properties[[nm]]
+      role <- prop_role(prop)
+      if (role %in% c("computed", "r_only", "runtime")) {
+        return(FALSE)
+      }
+      if (identical(role, "state")) {
+        return(TRUE)
+      }
+      fields <- get_spec_fields(prop)
+      is.null(fields) || !fields[["constant"]]
+    },
+    names_
+  )
+  # `S7_to_list()` because a value may itself be a config object -- a
+  # `GridSearchConfig` holds a `ResamplerConfig` -- and a record is JSON, not
+  # objects. Applied per value so NULLs survive.
+  keep
+} # /rtemis::record_names
+
+
+# %% provenance_of ----
+#' The provenance block for a fitted model
+#'
+#' Drawn from what the model already carries -- `@session` for timing,
+#' `@session_info` for the environment, `@data_fingerprint` for data identity --
+#' so a record always agrees with the object it came from. Only what a record needs to be read on its own is promoted; the full
+#' `sessionInfo()` stays where it is.
+#'
+#' @param x `Supervised` or `SupervisedRes` object.
+#' @param outcome Character: How the run ended; see `RUN_OUTCOMES`.
+#'
+#' @return `Provenance` object.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+provenance_of <- function(x, outcome = "completed") {
+  # A pipeline result carries no observability session, so timing and
+  # environment come from the current one. A `Supervised` records its own.
+  has <- function(nm) nm %in% names(S7_class(x)@properties)
+  session <- if (has("session")) prop(x, "session")
+  started <- if (is.null(session)) NULL else session@started
+  finished <- if (is.null(session)) NULL else session@finished
+  info <- if (has("session_info")) prop(x, "session_info") else list()
+  Provenance(
+    # Captured versions describe the training environment even after reload.
+    implementation = Implementation(
+      name = "rtemis",
+      version = info[["otherPkgs"]][["rtemis"]][["Version"]] %||%
+        info[["loadedOnly"]][["rtemis"]][["Version"]] %||%
+        as.character(utils::packageVersion("rtemis")),
+      language = "r",
+      language_version = info[["R.version"]][["version.string"]] %||%
+        R.version.string
+    ),
+    platform = info[["platform"]] %||% R.version[["platform"]],
+    started = iso8601(started),
+    finished = iso8601(finished),
+    elapsed_seconds = if (is.null(started) || is.null(finished)) {
+      0
+    } else {
+      as.numeric(difftime(finished, started, units = "secs"))
+    },
+    outcome = outcome,
+    data_training = if (has("data_fingerprint")) prop(x, "data_fingerprint")
+  )
+} # /rtemis::provenance_of
+
+
+# %% iso8601 ----
+#' A timestamp as ISO 8601, or "" when there is none
+#'
+#' @param x `POSIXct` or NULL.
+#'
+#' @return Character.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+iso8601 <- function(x) {
+  if (is.null(x) || length(x) == 0L) {
+    return("")
+  }
+  format(as.POSIXct(x), "%Y-%m-%dT%H:%M:%OS3Z", tz = "UTC")
+} # /rtemis::iso8601
+
+
+# %% record ----
+#' Derive a run record from a fitted model
+#'
+#' The record of what ran: every config value resolved, an `origin` saying where
+#' each came from, and a provenance block. Derived on demand from the configs
+#' the object already holds.
+#'
+#' @param x Fitted model object.
+#' @param ... Passed to methods.
+#'
+#' @return Named list, conforming to the family's `record.json`.
+#'
+#' @author EDG
+#' @export
+#' @examples
+#' mod <- train(iris, hyperparameters = setup_CART())
+#' names(record(mod))
+record <- new_generic("record", "x")
+
+
+# %% record.Supervised ----
+#' @author EDG
+#' @noRd
+method(record, Supervised) <- function(x, outcome = "completed") {
+  supervised_record(x, folds = list(x), outcome = outcome)
+} # /rtemis::record.Supervised
+
+
+# %% record.SupervisedRes ----
+#' @author EDG
+#' @noRd
+method(record, SupervisedRes) <- function(x, outcome = "completed") {
+  supervised_record(x, folds = x@models, outcome = outcome)
+} # /rtemis::record.SupervisedRes
+
+
+# %% supervised_record ----
+#' Assemble a supervised run record
+#'
+#' The top level is what was *asked for*; `folds` is what *ran*, once per model
+#' fitted. They are separate because a resampled run resolves different values
+#' in each fold -- early stopping picks a different `nrounds` every time -- so a
+#' single resolved value at the top would be a claim the run never made. A
+#' single fit is one fold.
+#'
+#' @param x `Supervised` or `SupervisedRes` object.
+#' @param folds List of `Supervised` objects: the models actually fitted.
+#' @param outcome Character: How the run ended; see `RUN_OUTCOMES`.
+#'
+#' @return Named list conforming to `supervised/r/v1/record.json`.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+supervised_record <- function(x, folds, outcome = "completed") {
+  input <- prop(x, "config")
+  if (is.null(input)) {
+    rtemis.core::abort(
+      "This model carries no input config, so a record cannot say what was asked for. Only a top-level `train()` call stores one.",
+      class = c("rtemis_null_input", "rtemis_input_error")
+    )
+  }
+  # Every block as the run was *given* it: comparing an input against itself
+  # yields origins of `user` / `default`, which is what "asked for" means.
+  blocks <- c(
+    "preprocessor_config",
+    "decomposition_config",
+    "hyperparameters",
+    "tuner_config",
+    "outer_resampling_config",
+    "execution_config"
+  )
+  asked <- lapply(blocks, function(nm) {
+    block <- prop(input, nm)
+    nested_record(block, block)
+  })
+  names(asked) <- blocks
+
+  own <- config_record(input, input)
+  own_names <- setdiff(names(own), c(blocks, "origin"))
+  c(
+    list(`$schema` = .RTEMIS_RECORD_SCHEMAS[["supervised"]]),
+    own[own_names],
+    asked,
+    list(
+      origin = own[["origin"]][own_names],
+      folds = lapply(
+        seq_along(folds),
+        function(i) fold_record(folds[[i]], i, input)
+      ),
+      # The headline scores, so "was this model any good?" is one lookup rather
+      # than an average over `folds`. Each fold's full metrics are there too;
+      # this block is the reason to open the file.
+      metrics = sample_metrics(x, metric_row),
+      metrics_sd = sample_metrics(x, metric_sd_row),
+      provenance = S7_to_list(provenance_of(x, outcome = outcome)),
+      # Filled by `write_record()`, which is where a file exists to point at.
+      # Present and null here so that a record built but not written states the
+      # same fields as one that was.
+      session = NULL
+    )
+  )
+} # /rtemis::supervised_record
+
+
+# %% fold_record ----
+#' What one fitted model resolved
+#'
+#' Paired against the run's input so each value carries its origin: a search
+#' space narrowed to one value reads `tuned`, a NULL the data filled reads
+#' `derived`.
+#'
+#' @param model `Supervised` object for one fold.
+#' @param index Integer: 1-based outer resample.
+#' @param input `SuperConfig` the *run* was given. A per-fold sub-model stores
+#'   none of its own -- one record per `train()` call is the design -- so
+#'   pairing a fold against `model@config` would compare it against nothing and
+#'   report every value as `derived`, including the ones the user fixed and the
+#'   ones tuning searched.
+#'
+#' @return Named list: one entry of the record's `folds` array.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+fold_record <- function(model, index, input = model@config) {
+  out <- list(index = as.integer(index))
+  if (!is.null(model@preprocessor)) {
+    out[["preprocessor_config"]] <- nested_record(
+      if (is.null(input)) NULL else input@preprocessor_config,
+      fitted_config(model@preprocessor)
+    )
+  }
+  if (!is.null(model@decomposition)) {
+    out[["decomposition_config"]] <- nested_record(
+      if (is.null(input)) NULL else input@decomposition_config,
+      model@decomposition@config
+    )
+  }
+  out[["hyperparameters"]] <- nested_record(
+    if (is.null(input)) NULL else input@hyperparameters,
+    model@hyperparameters
+  )
+  # The grid, the per-resample metrics and the winner, the fields the tuning
+  # schema declares, so a tuning decision can be re-examined from the record.
+  if (!is.null(model@tuner)) {
+    out[["tuning"]] <- c(
+      model@tuner@tuning_results[c("param_grid", "training", "validation")],
+      list(best = model@tuner@best_hyperparameters)
+    )
+  }
+  # What this fold scored, in full: the confusion matrix and per-class rows as
+  # well as the headline row. The record already said how every tuning
+  # *candidate* scored; without this it was silent on the model that was kept.
+  out[["metrics"]] <- sample_metrics(model, record_object)
+  out
+} # /rtemis::fold_record
+
+
+# %% SUPERVISED_SAMPLES ----
+# The samples a supervised run scores, in the order a reader expects them.
+# `SupervisedRes` has no validation sample, so each lookup is guarded.
+SUPERVISED_SAMPLES <- c("training", "validation", "test")
+
+
+# %% record_object ----
+#' An S7 object as a record block
+#'
+#' Writes every published property of `x`, including run state, so the record
+#' reports exactly what the run produced. Nested S7 objects, alone or in
+#' collections, are written the same way.
+#'
+#' @param x S7 object, or NULL.
+#'
+#' @return Named list, or NULL.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+record_object <- function(x) {
+  if (is.null(x)) {
+    return(NULL)
+  }
+  declared <- S7_class(x)@properties
+  nms <- published_prop_names(S7_class(x))
+  out <- lapply(nms, function(nm) {
+    value <- wire_value(prop(x, nm), declared[[nm]])
+    fields <- get_spec_fields(declared[[nm]])
+    if (
+      !is.null(value) &&
+        !is.null(fields[["target_class"]]) &&
+        fields[["container"]] != "none"
+    ) {
+      return(lapply(value, record_object))
+    }
+    if (S7_inherits(value)) record_object(value) else value
+  })
+  names(out) <- nms
+  out
+} # /rtemis::record_object
+
+
+# %% metric_row ----
+#' One sample's headline scores, as a flat name-to-value map
+#'
+#' The row a reader compares runs on: a regression sample's four metrics, or a
+#' classification sample's `overall` row. Per-class metrics and the confusion
+#' matrix are deliberately not here -- they are in the fold's full metrics
+#' block, which is the typed contract. This block exists to be read without
+#' computing anything, which is what makes an `outdir` of records rankable.
+#'
+#' @param x `Metrics` or `MetricsRes` object, or NULL.
+#'
+#' @return Named list of scalars, or NULL.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+metric_row <- function(x) {
+  if (is.null(x)) {
+    return(NULL)
+  }
+  row <- if (S7_inherits(x, MetricsRes)) {
+    # Resampled: the mean across folds, which is the comparable summary.
+    x@mean_metrics
+  } else if (S7_inherits(x, ClassificationMetrics)) {
+    x@metrics[["overall"]]
+  } else {
+    x@metrics
+  }
+  if (is.null(row)) NULL else as.list(row)
+} # /rtemis::metric_row
+
+
+# %% metric_sd_row ----
+#' One sample's dispersion across folds, or NULL for a single fit
+#'
+#' @param x `Metrics` or `MetricsRes` object, or NULL.
+#'
+#' @return Named list of scalars, or NULL when the run fitted one model and
+#'   there is no dispersion to report.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+metric_sd_row <- function(x) {
+  if (is.null(x) || !S7_inherits(x, MetricsRes)) {
+    return(NULL)
+  }
+  if (is.null(x@sd_metrics)) NULL else as.list(x@sd_metrics)
+} # /rtemis::metric_sd_row
+
+
+# %% sample_metrics ----
+#' Per-sample metrics of one model, under a given reader
+#'
+#' @param x `Supervised` or `SupervisedRes` object.
+#' @param reader Function applied to each sample's metrics object.
+#'
+#' @return Named list keyed by `SUPERVISED_SAMPLES`.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+sample_metrics <- function(x, reader) {
+  out <- lapply(SUPERVISED_SAMPLES, function(sample) {
+    nm <- paste0("metrics_", sample)
+    # `SupervisedRes` declares no validation sample.
+    if (!prop_exists(x, nm)) {
+      return(NULL)
+    }
+    reader(prop(x, nm))
+  })
+  names(out) <- SUPERVISED_SAMPLES
+  out
+} # /rtemis::sample_metrics
+
+
+# %% nested_record ----
+#' The record form of one nested config block, or NULL
+#'
+#' A family config serializes as its discriminator plus its settings as
+#' siblings, so its record is the leaf's record with the discriminator (and any
+#' field the family base declares for every variant) in front. A flat config is
+#' its own record. Either way the block carries its own `origin`, which is why
+#' the parent's does not cover it.
+#'
+#' @param input S7 config the run was given, or NULL.
+#' @param resolved S7 config the run used, or NULL.
+#'
+#' @return Named list, or NULL when the run used no such block.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+nested_record <- function(input, resolved) {
+  if (is.null(resolved)) {
+    return(NULL)
+  }
+  leaf <- config_record(input, resolved)
+  discriminator <- family_discriminator(resolved)
+  if (is.null(discriminator)) {
+    return(leaf)
+  }
+  # The discriminator always leads: without it a dispatcher matches no branch,
+  # and its `unevaluatedProperties` then rejects the very fields the leaf
+  # declares. The base's shared fields follow, since the dispatcher's record
+  # declares them and the leaf's does not. A shared field holding a config (an
+  # execution config's `device`) is a record of its own.
+  shared <- family_prop_values(
+    resolved,
+    family_base(S7_class(resolved)),
+    discriminator
+  )
+  for (nm in names(shared)) {
+    if (S7_inherits(shared[[nm]])) {
+      shared[[nm]] <- nested_record(
+        if (is.null(input)) NULL else prop(input, nm),
+        prop(resolved, nm)
+      )
+    }
+  }
+  c(shared, leaf)
+} # /rtemis::nested_record
+
+
+# %% family_discriminator ----
+#' The property a discriminated config family dispatches on
+#'
+#' Reads the family root's class declaration without a separate dispatch table.
+#'
+#' @param x S7 config object.
+#'
+#' @return Character, or NULL when `x` is not a discriminated family.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+family_discriminator <- function(x) {
+  base <- family_base(if (inherits(x, "S7_class")) x else S7_class(x))
+  if (is.null(base)) {
+    return(NULL)
+  }
+  attr(base, "rtemis_schema", exact = TRUE)[["discriminator"]]
+} # /rtemis::family_discriminator
+
+
+# %% record.Decomposition ----
+#' @author EDG
+#' @noRd
+method(record, Decomposition) <- function(x, outcome = "completed") {
+  pipeline_record(
+    x,
+    "decompose",
+    x@decompose_config,
+    "decomposition_config",
+    x@config,
+    outcome,
+    metrics_block = TRUE,
+    metrics = x@metrics
+  )
+} # /rtemis::record.Decomposition
+
+
+# %% record.Clustering ----
+#' @author EDG
+#' @noRd
+method(record, Clustering) <- function(x, outcome = "completed") {
+  pipeline_record(
+    x,
+    "cluster",
+    x@cluster_config,
+    "clustering_config",
+    x@config,
+    outcome,
+    metrics_block = TRUE,
+    metrics = x@metrics
+  )
+} # /rtemis::record.Clustering
+
+
+# %% pipeline_record ----
+#' Assemble a record for a single-run pipeline
+#'
+#' `decomp()` and `cluster()` fit one model, so there is no per-fold structure:
+#' the algorithm config appears once, resolved, with its origins. The supervised
+#' record's `folds` exists because outer resampling fits several models that
+#' resolve *different* values; nothing here does.
+#'
+#' @param x `Decomposition` or `Clustering` object.
+#' @param family Character: `"decompose"` or `"cluster"`.
+#' @param input S7 config object the run was given.
+#' @param block Character: the input's field holding the algorithm config.
+#' @param resolved S7 config object the run used.
+#' @param outcome Character: How the run ended; see `RUN_OUTCOMES`.
+#'
+#' @return Named list conforming to the family's `record.json`.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+pipeline_record <- function(
+  x,
+  family,
+  input,
+  block,
+  resolved,
+  outcome,
+  metrics_block = FALSE,
+  metrics = NULL
+) {
+  if (is.null(input)) {
+    rtemis.core::abort(
+      "This object carries no input config, so a record cannot say what was asked for.",
+      class = c("rtemis_null_input", "rtemis_input_error")
+    )
+  }
+  own <- config_record(input, input)
+  own_names <- setdiff(names(own), c(block, "origin"))
+  out <- c(
+    list(`$schema` = .RTEMIS_RECORD_SCHEMAS[[family]]),
+    own[own_names]
+  )
+  out[[block]] <- nested_record(prop(input, block), resolved)
+  # Only families whose record schema declares a `metrics` block get the key,
+  # and those declare it *required*: a run that failed before scoring writes an
+  # explicit null. `out[["metrics"]] <- NULL` would delete the element, so the
+  # single-bracket form stores the null. `record_object()` writes the metrics,
+  # since a metrics class declares everything it holds as run state, which
+  # `S7_to_list()` drops.
+  if (metrics_block) {
+    out["metrics"] <- list(record_object(metrics))
+  }
+  # Only the flat fields have an origin here: a nested block such as
+  # `execution_config` carries its own, and indexing by its name would add an
+  # unnamed null entry.
+  c(
+    out,
+    list(
+      origin = own[["origin"]][intersect(own_names, names(own[["origin"]]))],
+      provenance = S7_to_list(provenance_of(x, outcome = outcome))
+    )
+  )
+} # /rtemis::pipeline_record

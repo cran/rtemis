@@ -2,6 +2,67 @@
 # ::rtemis::
 # 2025- EDG rtemis.org
 
+# %% glmnet_design_matrix ----
+#' Design matrix passed to glmnet
+#'
+#' glmnet takes a numeric matrix, so factors are expanded to dummy variables.
+#' `penalty_factor` needs one entry per *expanded* column, which is why its
+#' length cannot be declared as `data_bound = "n_features"` - the expanded
+#' width exceeds the feature count whenever a factor is present.
+#'
+#' @param x tabular data: Training set (outcome in the last column).
+#'
+#' @return Numeric matrix.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+glmnet_design_matrix <- function(x) {
+  as.matrix(model.matrix(~., exc(x, NCOL(x)))[, -1])
+} # /rtemis::glmnet_design_matrix
+
+
+# %% validate_hyperparameters.GLMNETHyperparameters ----
+#' Validate GLMNET Hyperparameters
+#'
+#' `penalty_factor` is bound to the design-matrix width rather than the feature
+#' count, which the `data_bound` vocabulary cannot express; everything else is
+#' declarative and handled by `check_data_bounds()`.
+#'
+#' @param hyperparameters `GLMNETHyperparameters`: Hyperparameters to check.
+#' @param x tabular data: Training data.
+#'
+#' @return `hyperparameters`, invisibly.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+method(validate_hyperparameters, GLMNETHyperparameters) <- function(
+  hyperparameters,
+  x
+) {
+  check_data_bounds(hyperparameters, x)
+  penalty_factor <- hyperparameters[["penalty_factor"]]
+  # Only build the design matrix when there is something to check against it.
+  if (!is.null(penalty_factor)) {
+    n_design <- NCOL(glmnet_design_matrix(x))
+    if (length(penalty_factor) != n_design) {
+      rtemis.core::abort(
+        "`penalty_factor` must have one value per design-matrix column: expected length ",
+        n_design,
+        ", got ",
+        length(penalty_factor),
+        ". Factors are expanded to dummy variables, so this can exceed the number of features (",
+        NCOL(features(x)),
+        ").",
+        class = c("rtemis_length_error", "rtemis_input_error")
+      )
+    }
+  }
+  invisible(hyperparameters)
+} # /rtemis::validate_hyperparameters.GLMNETHyperparameters
+
+
 # %% train_.GLMNETHyperparameters ----
 #' Train a GLMNET model
 #'
@@ -23,7 +84,7 @@ method(train_, GLMNETHyperparameters) <- function(
   x,
   weights = NULL,
   dat_validation = NULL,
-  execution_config = setup_ExecutionConfig(),
+  execution_config = setup_FutureExecution(),
   verbosity = 1L
 ) {
   # Dependencies ----
@@ -36,11 +97,6 @@ method(train_, GLMNETHyperparameters) <- function(
       "Hyperparameters must be fixed - use train() instead.",
       class = c("rtemis_value_error", "rtemis_input_error")
     )
-  }
-
-  # Convert "null" lambda to NULL
-  if (hyperparameters[["lambda"]] == "null") {
-    hyperparameters@hyperparameters[["lambda"]] <- NULL
   }
 
   # Data ----
@@ -60,38 +116,29 @@ method(train_, GLMNETHyperparameters) <- function(
   } else {
     NA_integer_
   }
-  family <- if (is.null(hyperparameters[["family"]])) {
-    if (type == "Regression") {
+  # A family the user set wins; NULL is resolved from the outcome. Written back
+  # to the hyperparameters, so that the family the model was trained with
+  # is among the hyperparameters `train()` adopts and the model reports.
+  if (is.null(hyperparameters[["family"]])) {
+    hyperparameters@family <- if (type == "Regression") {
       "gaussian"
-    } else if (type == "Classification") {
-      if (n_classes == 2L) {
-        "binomial"
-      } else {
-        "multinomial"
-      }
+    } else if (n_classes == 2L) {
+      "binomial"
+    } else {
+      "multinomial"
     }
   }
+  family <- hyperparameters[["family"]]
 
   # Train ----
-  # Create xm so that the correct NCOL is used for penalty_factor,
-  # since factors are converted to dummy variables.
-  xm <- as.matrix(
-    model.matrix(~., exc(x, NCOL(x)))[, -1]
-  )
-  # Check data-specific hyperparameter values
-  # penalty_factor must be of length = N features.
+  xm <- glmnet_design_matrix(x)
+  # penalty_factor defaults to no differential penalty. A user-supplied value
+  # has its length checked by validate_hyperparameters() before tuning begins.
   if (is.null(hyperparameters[["penalty_factor"]])) {
-    hyperparameters@hyperparameters[["penalty_factor"]] <- rep(1, NCOL(xm))
+    hyperparameters@penalty_factor <- rep(1, NCOL(xm))
     if (verbosity > 1L) {
       info("NCOL(xm): ", NCOL(xm))
       info('Updated hyperparameters[["penalty_factor"]] to all 1s.')
-    }
-  } else {
-    if (length(hyperparameters[["penalty_factor"]]) != NCOL(xm)) {
-      rtemis.core::abort(
-        "Length of penalty_factor must be equal to the number of predictors.",
-        class = c("rtemis_length_error", "rtemis_input_error")
-      )
     }
   }
   # if lambda is NULL, use cv.glmnet to find optimal lambda
@@ -101,7 +148,6 @@ method(train_, GLMNETHyperparameters) <- function(
       y = outcome(x),
       family = family,
       weights = weights,
-      offset = hyperparameters[["offset"]],
       alpha = hyperparameters[["alpha"]],
       nlambda = hyperparameters[["nlambda"]],
       standardize = hyperparameters[["standardize"]],
@@ -115,7 +161,6 @@ method(train_, GLMNETHyperparameters) <- function(
       y = outcome(x),
       family = family,
       weights = weights,
-      offset = hyperparameters[["offset"]],
       alpha = hyperparameters[["alpha"]],
       nlambda = hyperparameters[["nlambda"]],
       lambda = hyperparameters[["lambda"]],
@@ -125,7 +170,10 @@ method(train_, GLMNETHyperparameters) <- function(
     )
     check_inherits(model, "glmnet")
   }
-  list(model = model, preprocessor = NULL)
+  # `hyperparameters` is returned because this method resolved values into
+  # it (R copied the caller's object, so the caller cannot see them).
+  # `train()` adopts them, and the fitted model reports what it used.
+  list(model = model, preprocessor = NULL, hyperparameters = hyperparameters)
 } # /rtemis::train_.GLMNETHyperparameters
 
 #' Predict from GLMNET model
@@ -141,6 +189,7 @@ method(predict_super, class_glmnet) <- function(
   model,
   newdata,
   type = NULL,
+  execution_config = NULL,
   verbosity = 0L
 ) {
   # Determine type
@@ -174,6 +223,7 @@ method(predict_super, class_cv.glmnet) <- function(
   model,
   newdata,
   type = NULL,
+  execution_config = NULL,
   verbosity = 0L
 ) {
   # Determine type
@@ -225,9 +275,21 @@ method(varimp_super, class_glmnet) <- function(model) {
   # Exclude intercept
   coefs <- coefs[, 1][-1]
   VariableImportance(
-    data.table(
-      variable = names(coefs),
-      Coefficient = unname(coefs)
+    measures = list(
+      Coefficient = importance_measure(
+        names(coefs),
+        unname(coefs),
+        kind = "coefficient",
+        signed = TRUE,
+        scale_dependent = TRUE,
+        direction = "absolute",
+        description = paste0(
+          "Penalized coefficient of each predictor at the selected penalty, ",
+          "excluding the intercept, per unit of the predictor as received; ",
+          "glmnet reports coefficients on this scale whether or not it ",
+          "standardized internally. Zero for a predictor the penalty excluded."
+        )
+      )
     )
   )
 } # /rtemis::varimp_super.class_glmnet
@@ -248,9 +310,119 @@ method(varimp_super, class_cv.glmnet) <- function(model) {
   # Exclude intercept
   coefs <- coefs[, 1][-1]
   VariableImportance(
-    data.table(
-      variable = names(coefs),
-      Coefficient = unname(coefs)
+    measures = list(
+      Coefficient = importance_measure(
+        names(coefs),
+        unname(coefs),
+        kind = "coefficient",
+        signed = TRUE,
+        scale_dependent = TRUE,
+        direction = "absolute",
+        description = paste0(
+          "Penalized coefficient of each predictor at the selected penalty, ",
+          "excluding the intercept, per unit of the predictor as received; ",
+          "glmnet reports coefficients on this scale whether or not it ",
+          "standardized internally. Zero for a predictor the penalty excluded."
+        )
+      )
     )
   )
 } # /rtemis::varimp_super.class_cv.glmnet
+
+
+# %% glmnet_coefficients ----
+#' Coefficients of a fitted glmnet, as a design-matrix-aligned matrix
+#'
+#' `coef()` returns a `(p + 1) x nlambda` sparse matrix, or a list of them --
+#' one per class -- for a multinomial fit. The first column is taken because
+#' that is the one `predict_super()` predicts from: a `cv.glmnet` resolves it to
+#' its chosen lambda, and a `glmnet` fitted over a path leaves the first. The
+#' choice is not trusted -- `linear_shap()` checks the reconstruction against
+#' the model's own linear predictor.
+#'
+#' @param model `glmnet` or `cv.glmnet` object.
+#'
+#' @return Numeric matrix, `(p + 1) x n_outputs`, intercept first.
+#'
+#' @keywords internal
+#' @noRd
+glmnet_coefficients <- function(model) {
+  coefs <- coef(model)
+  if (is.list(coefs)) {
+    return(do.call(
+      cbind,
+      lapply(coefs, function(x) as.matrix(x)[, 1L, drop = FALSE])
+    ))
+  }
+  as.matrix(coefs)[, 1L, drop = FALSE]
+} # /rtemis::glmnet_coefficients
+
+
+# %% explain_super_glmnet ----
+#' LinearSHAP contributions from a glmnet
+#'
+#' The elastic net is linear on its link scale, so `phi_j = beta_j * (x_j -
+#' E[x_j])` is exact and closed-form. Regularization shrinks the coefficients
+#' and so shrinks the contributions with them, which is the intended reading: a
+#' feature the penalty zeroed contributed nothing to this prediction.
+#'
+#' `glmnet` builds its design with `model.matrix(~., newdata)`, as
+#' `predict_super()` does, so that expansion is undone here.
+#'
+#' Shared by the `glmnet` and `cv.glmnet` methods, which differ only in how
+#' `coef()` resolves its lambda.
+#'
+#' @param model `glmnet` or `cv.glmnet` object.
+#' @param newdata tabular data: Cases to explain.
+#' @param background tabular data: Reference cases.
+#' @param estimator Character: Resolved estimator.
+#' @param perturbation Character: Resolved value function.
+#' @param scale Character: Scale the contributions are additive on.
+#' @param type Character: "Regression" or "Classification".
+#' @param verbosity Integer: Verbosity level.
+#'
+#' @return List with `phi`, `baseline`, `predicted` and `exact`.
+#'
+#' @keywords internal
+#' @noRd
+explain_super_glmnet <- function(
+  model,
+  newdata,
+  background,
+  estimator,
+  perturbation,
+  scale,
+  type,
+  verbosity = 0L
+) {
+  check_shap_linear(estimator, perturbation, "GLMNET")
+  shap_require_background(background, "LinearSHAP")
+  model_matrix_shap(
+    newdata = newdata,
+    background = background,
+    formula_terms = stats::terms(~., data = as.data.frame(newdata)),
+    coefficients = glmnet_coefficients(model),
+    margin_fn = function(design) {
+      link <- predict(model, newx = design, type = "link")
+      # A multinomial fit returns cases x classes x lambdas; the first lambda is
+      # the one the coefficients were read at.
+      if (length(dim(link)) > 2L) {
+        link <- link[,, 1L, drop = TRUE]
+      }
+      matrix(link, nrow = NROW(design))
+    },
+    label = "LinearSHAP"
+  )
+} # /rtemis::explain_super_glmnet
+
+
+# %% explain_super.class_glmnet ----
+#' @keywords internal
+#' @noRd
+method(explain_super, class_glmnet) <- explain_super_glmnet
+
+
+# %% explain_super.class_cv.glmnet ----
+#' @keywords internal
+#' @noRd
+method(explain_super, class_cv.glmnet) <- explain_super_glmnet

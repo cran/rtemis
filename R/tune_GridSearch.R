@@ -2,6 +2,24 @@
 # ::rtemis::
 # 2025- EDG rtemis.org
 
+# %% MAXIMIZED_METRICS ----
+# Tuning metrics for which a higher value is better. `tune_GridSearch()`
+# maximizes these and minimizes every other metric when the tuner config leaves
+# `maximize` unset.
+MAXIMIZED_METRICS <- c(
+  "accuracy",
+  "balanced_accuracy",
+  "sensitivity",
+  "specificity",
+  "ppv",
+  "npv",
+  "f1",
+  "auc",
+  "rsq",
+  "Concordance"
+)
+
+
 # %% tune_GridSearch ----
 #' \pkg{rtemis} internal: Grid Search for Hyperparameter Tuning of \pkg{rtemis} Learners
 #'
@@ -22,7 +40,7 @@
 #' @param x tabular data: Training set.
 #' @param hyperparameters `Hyperparameters` object created with a learner's `setup_*` function.
 #' @param tuner_config `TunerConfig` object created with [setup_GridSearch].
-#' @param preprocessor_config Optional `PreprocessorConfig` object: Applied within each tuning
+#' @param preprocessor_config Optional `SupervisedPreprocessorConfig` object: Applied within each tuning
 #' fold so hyperparameters are evaluated on preprocessed data.
 #' @param decomposition_config Optional `DecompositionConfig` object: Setup using a decomposition
 #' `setup_`*` function.
@@ -51,29 +69,14 @@ tune_GridSearch <- function(
   n_workers = 1L,
   backend = NULL,
   future_plan = NULL,
+  seed = NULL,
+  shared_memory = "none",
   verbosity = 1L,
   on_error = "continue"
 ) {
-  check_is_S7(hyperparameters, Hyperparameters)
+  check_hyperparameters(hyperparameters)
   check_is_S7(tuner_config, TunerConfig)
   stopifnot(needs_tuning(hyperparameters))
-
-  # Dependencies ----
-  if (backend == "future") {
-    check_dependencies("futurize", "future.apply")
-    if (!is.null(future_plan) && future_plan == "sequential") {
-      if (n_workers > 1L) {
-        rtemis.core::abort(
-          "Requested 'sequential' future plan, which supports 1 worker, but ",
-          n_workers,
-          " workers were requested.",
-          class = c("rtemis_value_error", "rtemis_input_error")
-        )
-      }
-    }
-  } else if (backend == "mirai") {
-    check_dependencies("mirai")
-  }
 
   # Intro ----
   start_time <- intro(
@@ -84,77 +87,68 @@ tune_GridSearch <- function(
 
   # Arguments ----
   algorithm <- hyperparameters@algorithm
-
-  # Parallel Processing Strategy ----
-  # If backend is NULL, default to "none"
+  # Backend validation and worker-count handling live in `progress_plapply()`, which
+  # owns dispatch for both this path and outer resampling.
   if (is.null(backend)) {
     backend <- "none"
   }
 
-  # If backend is "future" or "mirai" with n_workers = 1, we execute
-  # sequentially using the respective backend just to test that the
-  # parallelization setup works.
-  # If the user wants standard sequential execution, they should use/leave
-  # backend = "none" (default).
-  if (backend != "none" && n_workers == 1L) {
-    if (verbosity > 0L) {
-      msg0(
-        "Using ",
-        backend,
-        " with 1 worker"
-      )
-    }
-  }
-
   # Make Grid ----
-  grid_params <- get_hyperparams_need_tuning(hyperparameters)
-  n_resamples <- tuner_config[["resampler_config"]][["n"]]
+  # A set searches over its members; a single object is its own only member, and
+  # `tuning_members()` returns NULL for it so a fit that came from no set leaves
+  # `variant` unset.
+  members <- tuning_members(hyperparameters)
+  # Which hyperparameters were left for the search to determine. The GLMNET and
+  # LightGBM collection steps below read it to tell "the user fixed this" from
+  # "the backend chose it". For a set it is the union over members: those steps
+  # rewrite the whole grid, so the question they ask -- was this left open? --
+  # is only answerable of the search as a whole.
+  grid_params <- if (is.null(members)) {
+    get_hyperparams_need_tuning(hyperparameters)
+  } else {
+    Reduce(
+      function(a, b) utils::modifyList(a, b),
+      lapply(members, get_hyperparams_need_tuning)
+    )
+  }
   search_type <- tuner_config[["search_type"]]
-  # expand_grid converts NULL to "null" for expansion to work.
-  param_grid <- expand_grid(grid_params, stringsAsFactors = FALSE)
-  param_grid <- cbind(param_combo_id = seq_len(NROW(param_grid)), param_grid)
+  grid_summary <- tuning_grid_summary(hyperparameters, tuner_config)
+  n_resamples <- grid_summary[["n_resamples"]]
+  param_grid <- tuning_grid(hyperparameters)
+  n_combinations_gated <- NROW(param_grid)
+  if (search_type == "randomized") {
+    # Sampled here, before anything is derived from the grid, so that each
+    # selected combination is still run on every resample.
+    param_grid <- param_grid[
+      sort(sample.int(
+        n_combinations_gated,
+        grid_summary[["n_param_combinations"]]
+      )),
+      ,
+      drop = FALSE
+    ]
+    rownames(param_grid) <- NULL
+  }
   n_param_combinations <- NROW(param_grid)
-  res_param_grid <- expand_grid(
-    c(list(resample_id = seq_len(n_resamples)), grid_params),
-    stringsAsFactors = FALSE
+  # Resample varies fastest within a combination, which is the order the
+  # per-combination aggregation below indexes with `each = n_resamples`.
+  res_param_grid <- cbind(
+    resample_id = rep(seq_len(n_resamples), times = n_param_combinations),
+    param_grid[
+      rep(seq_len(n_param_combinations), each = n_resamples),
+      ,
+      drop = FALSE
+    ]
+  )
+  rownames(res_param_grid) <- NULL
+  param_grid <- cbind(
+    param_combo_id = seq_len(n_param_combinations),
+    param_grid
   )
   n_res_x_comb <- NROW(res_param_grid)
-  if (search_type == "randomized") {
-    index_per_resample <- sample(
-      n_param_combinations,
-      round(tuner_config[["randomize_p"]] * n_param_combinations)
-    )
-    res_param_grid <- res_param_grid[rep(index_per_resample, n_resamples), ]
-  }
 
   # Intro pt. 2 ----
-  if (verbosity > 0L) {
-    msg0(
-      fmt("<> ", col = col_tuner, bold = TRUE),
-      "Tuning ",
-      algorithm,
-      " by ",
-      search_type,
-      " grid search with ",
-      desc(tuner_config@config[["resampler_config"]]),
-      "..."
-    )
-    msg0(
-      fmt(n_param_combinations, col = col_tuner, bold = TRUE),
-      ngettext(
-        n_param_combinations,
-        " parameter combination x ",
-        " parameter combinations x "
-      ),
-      fmt(n_resamples, col = col_tuner, bold = TRUE),
-      " resamples: ",
-      fmt(n_res_x_comb, col = col_tuner, bold = TRUE),
-      " models total",
-      " (",
-      Sys.getenv("R_PLATFORM"),
-      ")."
-    )
-  }
+  tuning_intro(grid_summary, algorithm, tuner_config, verbosity)
 
   # Resamples ----
   res <- resample(
@@ -163,230 +157,66 @@ tune_GridSearch <- function(
     verbosity = verbosity
   )
 
-  # learner1 ----
-  if (backend == "future") {
-    ptn <- progressr::progressor(steps = NROW(res_param_grid))
-  }
-  learner1 <- function(
-    index,
+  # Grid cells ----
+  x_shared <- share_payload(
     x,
-    res,
-    res_param_grid,
-    hyperparameters,
-    preprocessor_config,
-    decomposition_config,
+    mode = shared_memory,
+    backend = backend,
+    future_plan = future_plan,
+    n_workers = n_workers
+  )
+  weights_shared <- share_payload(
     weights,
-    verbosity,
-    save_mods,
-    n_res_x_comb,
-    on_error = "continue"
-  ) {
-    if (verbosity > 1L) {
-      info(
-        "Running grid line #",
-        fmt(index, bold = TRUE),
-        "/",
-        NROW(res_param_grid),
-        "...",
-        caller = "tune_GridSearch"
-      )
-    }
-    res1 <- res[[res_param_grid[index, "resample_id"]]]
-    dat_train1 <- x[res1, ]
-    weights1 <- weights[res1]
-    dat_valid1 <- x[-res1, ]
-    hyperparams1 <- hyperparameters
-    hyperparams1 <- update(
-      hyperparams1,
-      as.list(res_param_grid[index, 2:NCOL(res_param_grid), drop = FALSE]),
-      tuned = TUNED_STATUS_TUNING # Hyperparameters are being tuned
-    )
-
-    # Detach any active observability session so the inner train() is opaque to the host
-    # graph; the host host-synthesizes one grid_cell node per cell (uniform across
-    # backends). In daemons the session is already NULL, so this is a harmless no-op.
-    saved_session <- live[["session"]]
-    live[["session"]] <- NULL
-    on.exit(live[["session"]] <- saved_session, add = TRUE)
-    run_cell <- function() {
-      do_call(
-        "train",
-        args = list(
-          x = dat_train1,
-          dat_validation = dat_valid1,
-          algorithm = hyperparams1@algorithm,
-          preprocessor_config = preprocessor_config,
-          decomposition_config = decomposition_config,
-          hyperparameters = hyperparams1,
-          weights = weights1,
-          verbosity = verbosity - 1L
-        )
-      )
-    }
-    # Failure policy (specs/observability.md section 7): under "continue" a grid-cell
-    # failure is captured and returned as a marker (non-fatal); otherwise it propagates.
-    # Timestamps bracket the actual cell run so the host can record real durations on the
-    # synthesized grid_cell nodes (rather than a zero-width now/now interval).
-    cell_t_start <- Sys.time()
-    mod1 <- if (identical(on_error, "continue")) {
-      tryCatch(run_cell(), error = function(e) e)
-    } else {
-      run_cell()
-    }
-    cell_t_end <- Sys.time()
-    if (inherits(mod1, "condition")) {
-      return(list(
-        id = index,
-        resample_id = res_param_grid[index, "resample_id"],
-        metrics_training = NULL,
-        metrics_validation = NULL,
-        type = NA_character_,
-        hyperparameters = hyperparams1,
-        failed = TRUE,
-        error = conditionMessage(mod1),
-        t_start = cell_t_start,
-        t_end = cell_t_end
-      ))
-    }
-
-    out1 <- list(
-      id = index,
-      resample_id = res_param_grid[index, "resample_id"],
-      metrics_training = mod1@metrics_training,
-      metrics_validation = mod1@metrics_validation,
-      type = mod1@type,
-      hyperparameters = hyperparams1,
-      failed = FALSE,
-      t_start = cell_t_start,
-      t_end = cell_t_end
-    )
-
-    # Algorithm-specific params ----
-    # => add to hyperparameters
-    if (algorithm == "GLMNET") {
-      out1[["hyperparameters"]]@hyperparameters[["lambda.min"]] <- mod1@model[[
-        "lambda.min"
-      ]]
-      out1[["hyperparameters"]]@hyperparameters[["lambda.1se"]] <- mod1@model[[
-        "lambda.1se"
-      ]]
-    }
-    if (algorithm == "LightGBM") {
-      # Check best_iter is meaningful, otherwise issue message and set to 100L
-      best_iter <- mod1@model[["best_iter"]]
-      if (is.null(best_iter) || best_iter == -1 || best_iter == 0) {
-        info(
-          paste(
-            "best_iter returned from lightgbm:",
-            best_iter,
-            "- setting to 100L"
-          )
-        )
-        best_iter <- 100L
-      }
-      out1[["hyperparameters"]]@hyperparameters[["best_iter"]] <- best_iter
-    }
-    # if (algorithm %in% c("LINAD", "LINOA")) {
-    #   out1$est.n.leaves <- mod1$mod$n.leaves
-    # }
-    # if (algorithm == "LIHADBoost") {
-    #   out1$sel.n.steps <- mod1$mod$selected.n.steps
-    # }
-    if (save_mods) {
-      out1[["mod1"]] <- mod1
-    }
-    if (backend == "future") {
-      ptn(sprintf("Tuning resample %i/%i", index, n_res_x_comb))
-    }
-    out1
-  } # /learner1
+    mode = shared_memory,
+    backend = backend,
+    future_plan = future_plan,
+    n_workers = n_workers
+  )
+  run_grid_cell <- make_grid_cell_runner(
+    x = x_shared,
+    res_param_grid = res_param_grid,
+    hyperparameters = hyperparameters,
+    members = members,
+    preprocessor_config = preprocessor_config,
+    decomposition_config = decomposition_config,
+    weights = weights_shared,
+    algorithm = algorithm,
+    save_mods = save_mods,
+    # Failure policy (specs/observability.md section 7): a grid-cell failure is fatal
+    # only under "stop". "stop_outer" tolerates cells and is fatal for outer folds alone.
+    fatal = identical(on_error, "stop"),
+    verbosity = verbosity
+  )
 
   # Train Grid ----
-  if (backend == "none") {
-    if (verbosity > 0L) {
-      msg("Tuning in sequence")
-    }
-    # Sequential execution with cli progress.
-    grid_run <- lapply(
-      cli::cli_progress_along(
-        seq_len(n_res_x_comb),
-        name = paste0("Tuning... (", n_res_x_comb, " combinations)"),
-        type = "tasks"
-      ),
-      FUN = learner1,
-      x = x,
-      res = res,
-      hyperparameters = hyperparameters,
-      res_param_grid = res_param_grid,
-      preprocessor_config = preprocessor_config,
-      decomposition_config = decomposition_config,
-      weights = weights,
-      verbosity = verbosity,
-      save_mods = save_mods,
-      n_res_x_comb = n_res_x_comb,
-      on_error = on_error
+  # One dispatcher for every backend, shared with outer resampling. Cells receive one RNG
+  # substream each, keyed by cell index, so a grid search gives the same answer under
+  # "none", "future" and "mirai" at any worker count.
+  # Each cell receives its own resample and no other.
+  cells <- lapply(seq_len(n_res_x_comb), function(index) {
+    list(
+      index = index,
+      resample = res@resamples[[res_param_grid[index, "resample_id"]]]
     )
-  } else if (backend == "future") {
-    # Future parallelization
-    future_plan <- set_preferred_plan(
-      requested_plan = future_plan,
-      n_workers = n_workers,
-      envir = parent.frame(),
-      verbosity = verbosity
-    )
-    if (verbosity > 0L) {
-      msg0(
-        "Tuning using future (",
-        bold(future_plan),
-        "); N workers: ",
-        bold(n_workers)
-      )
-    }
-    if (verbosity > 1L) {
-      # verify plan set by set_preferred_plan with envir
-      info("Current future plan:")
-      print(future::plan())
-    }
-    grid_run <- lapply(
-      X = seq_len(n_res_x_comb),
-      FUN = learner1,
-      x = x,
-      res = res,
-      hyperparameters = hyperparameters,
-      res_param_grid = res_param_grid,
-      preprocessor_config = preprocessor_config,
-      decomposition_config = decomposition_config,
-      weights = weights,
-      verbosity = verbosity,
-      save_mods = save_mods,
-      n_res_x_comb = n_res_x_comb,
-      on_error = on_error
-    ) |>
-      futurize::futurize(seed = TRUE, globals = FALSE)
-  } else if (backend == "mirai") {
-    if (verbosity > 0L) {
-      msg("Tuning using mirai; N workers:", bold(n_workers))
-    }
-    mirai::daemons(n_workers, dispatcher = TRUE)
-    on.exit(mirai::daemons(0L))
-    grid_run <- mirai::mirai_map(
-      .x = seq_len(n_res_x_comb),
-      .f = learner1,
-      .args = list(
-        x = x,
-        res = res,
-        hyperparameters = hyperparameters,
-        res_param_grid = res_param_grid,
-        preprocessor_config = preprocessor_config,
-        decomposition_config = decomposition_config,
-        weights = weights,
-        verbosity = verbosity,
-        save_mods = save_mods,
-        n_res_x_comb = n_res_x_comb,
-        on_error = on_error
-      )
-    )
-  }
+  })
+  grid_run <- progress_plapply(
+    cells,
+    run_grid_cell,
+    backend = backend,
+    n_workers = n_workers,
+    future_plan = future_plan,
+    seeds = rng_substreams(seed, n_res_x_comb),
+    label = "Tuning",
+    kind = "tune",
+    stop_on_error = identical(on_error, "stop"),
+    verbosity = verbosity
+  )
+  grid_run <- Map(
+    normalize_cell_result,
+    grid_run,
+    seq_len(n_res_x_comb),
+    res_param_grid[, "resample_id"]
+  )
 
   # Metric ----
   type <- supervised_type(x)
@@ -403,22 +233,14 @@ tune_GridSearch <- function(
     tuner_config@config[["metric"]] <- metric
   }
   if (is.null(maximize)) {
-    maximize <- metric %in%
-      c("accuracy", "balanced_accuracy", "rsq", "r")
+    maximize <- metric %in% MAXIMIZED_METRICS
     tuner_config@config[["maximize"]] <- maximize
   }
   select_fn <- if (maximize) which.max else which.min
   verb <- if (maximize) "maximize" else "minimize"
 
   # Aggregate ----
-  # Average test errors
-  # if using mirai, wait for all to finish
-  if (backend == "mirai") {
-    # Appease R CMD check
-    .progress <- NULL
-    grid_run <- grid_run[.progress]
-    # grid_run <- mirai::collect_mirai(grid_run)
-  }
+  # Average test errors.
   # Host-synthesize one grid_cell node per cell under the active "tune" node, with status
   # and error filled from the returned results. See specs/observability.md section 4.
   for (r in grid_run) {
@@ -450,10 +272,14 @@ tune_GridSearch <- function(
     )
   )
   if (length(ok_idx) == 0L) {
+    # Naming the first failure: "all cells failed" is a count, and the cause is
+    # the same for every cell often enough that the first one is the answer.
+    first_error <- grid_run[[1L]][["error"]]
     rtemis.core::abort(
       "All ",
       n_res_x_comb,
       " tuning grid cells failed; cannot select hyperparameters.",
+      if (is.null(first_error)) "" else paste0(" First failure: ", first_error),
       class = c("rtemis_error", "rtemis_runtime_error")
     )
   }
@@ -622,27 +448,40 @@ tune_GridSearch <- function(
   # } /XGBoost
 
   ## LINAD ----
-  # if (algorithm %in% c("LINAD", "LINOA")) {
-  #   if (verbosity > 1L) {
-  #     info("Extracting best N leaves from LINAD models...")
-  #   }
-  #   est.n.leaves.all <- data.frame(n.leaves = plyr::laply(
-  #     grid_run,
-  #     \(x) ifelse(length(x$est.n.leaves) == 0, 1, x$est.n.leaves)
-  #   ))
-  #   est.n.leaves.all$param_combo_id <- rep(seq_len(n_param_combinations),
-  #     each = n_resamples
-  #   )
-  #   est.n.leaves.by.param_combo_id <- aggregate(
-  #     n.leaves ~ param_combo_id, est.n.leaves.all,
-  #     metrics_aggregate_fn
-  #   )
-  #   tune_results <- cbind(
-  #     n.leaves =
-  #       round(est.n.leaves.by.param_combo_id$n.leaves), tune_results
-  #   )
-  #   n_params <- n_params + 1
-  # } # /LINAD, LINOA
+  # Each cell selected its own leaf count on its resample's validation fold;
+  # the final fit has no validation set and would otherwise keep every leaf it
+  # grew. Carrying the average back means the model trained on all the data is
+  # the size tuning measured, as `nrounds` is for LightGBM above.
+  if (algorithm == "LINAD") {
+    if (verbosity > 1L) {
+      info("Extracting best N of leaves from LINAD models...")
+    }
+    leaves_cv <- data.table(
+      best_n_leaves = vapply(
+        grid_run,
+        function(cell) {
+          selected <- cell[["hyperparameters"]][["best_n_leaves"]]
+          if (is.null(selected)) NA_real_ else as.numeric(selected)
+        },
+        numeric(1L)
+      )
+    )
+    leaves_cv[["param_combo_id"]] <- rep(
+      seq_len(n_param_combinations),
+      each = n_resamples
+    )
+    leaves_by_param_combo_id <- leaves_cv[,
+      lapply(.SD, function(values) {
+        get(tuner_config[["metrics_aggregate_fn"]])(values, na.rm = TRUE)
+      }),
+      by = param_combo_id
+    ]
+    selected_leaves <- as.integer(round(
+      leaves_by_param_combo_id[["best_n_leaves"]]
+    ))
+    param_grid[["best_n_leaves"]] <- selected_leaves
+    tune_results[["param_grid"]][["best_n_leaves"]] <- selected_leaves
+  } # /LINAD
 
   ## LIHADBoost ----
   # if (algorithm == "LIHADBoost") {
@@ -670,18 +509,92 @@ tune_GridSearch <- function(
   # Consider explicitly sorting hyperparam values in increasing order,
   # so that in case of tie, lowest value is chosen -
   # if that makes sense, e.g. n.leaves, etc.
+  best_row <- select_fn(tune_results[["metrics_validation"]][[metric]])
+  # A combination whose aggregated metric is NA or NaN cannot be ranked, and when that is
+  # every combination `which.max`/`which.min` select nothing.
+  #
+  # An empty selection does not stay empty: `as.integer()` turns the resulting zero-row
+  # slice into `NA_integer_`, and indexing the grid with that yields a row of NAs. Every
+  # tuned hyperparameter is then set to NA -- not left at the value it came in with. What
+  # happens next is algorithm-dependent and none of it is what the user asked for: an
+  # algorithm that tolerates NA falls back to its own default (LightGBM reverts to
+  # `max_nrounds` with early stopping), and one that does not fails its validator with a
+  # message naming NULL, which points nowhere near the real problem.
+  #
+  # A cell failure is one way to get here; a degenerate inner resample is another and does
+  # not require any failure at all. `balanced_accuracy` averages per-class recall, so a
+  # validation fold missing a class scores NaN, and `mean()` carries that NaN to the
+  # combination -- reachable with small multiclass data long before anything errors.
+  #
+  # The condition is a warning: the run returns a model, and the warning reports that the
+  # tuned hyperparameters were set to NA.
+  if (length(best_row) == 0L) {
+    n_failed <- sum(vapply(
+      grid_run,
+      function(r) isTRUE(r[["failed"]]),
+      logical(1L)
+    ))
+    rtemis.core::warn(
+      "No hyperparameter combination could be scored on ",
+      metric,
+      " across every inner resample (",
+      n_failed,
+      " of ",
+      n_res_x_comb,
+      " grid cells failed), so tuning cannot select a winner: every tuned ",
+      "hyperparameter is left as NA and the algorithm falls back to its own default. ",
+      "Check for degenerate resamples -- a metric undefined on any one of them, such ",
+      "as balanced_accuracy where a fold is missing a class, makes its whole ",
+      "combination unrankable."
+    )
+  }
   best_param_combo_id <- as.integer(
-    tune_results[["metrics_validation"]][
-      select_fn(tune_results[["metrics_validation"]][[metric]]),
-      1
-    ]
+    tune_results[["metrics_validation"]][best_row, 1]
   )
-  best_param_combo <- as.list(param_grid[best_param_combo_id, -1, drop = FALSE])
+  best_param_combo <- grid_row_values(
+    param_grid,
+    best_param_combo_id,
+    grid_hyperparameter_columns(param_grid)
+  )
+  best_variant <- grid_variant(param_grid, best_param_combo_id)
   if (verbosity > 0L) {
     msg(
-      paste0("Best config to ", paste(verb, metric), ":")
+      paste0(
+        "Best config to ",
+        paste(verb, metric),
+        if (is.null(best_variant)) "" else paste0(" (", best_variant, ")"),
+        ":"
+      )
     )
-    print_tune_finding(grid_params, best_param_combo)
+    # For a set, only what the **winning member** actually searched. The union
+    # grid holds every member's tuned hyperparameters, so reporting it whole
+    # presents one member's candidates as another's: `lambda` searched over
+    # {0.01, 0.1} inside one variant reads as {0.01, 0.1, NULL} once three
+    # variants that do not set it are folded in, and the NULL is not a candidate
+    # anyone offered.
+    shown_columns <- grid_hyperparameter_columns(param_grid)
+    shown_grid <- param_grid
+    if (!is.null(best_variant)) {
+      shown_columns <- intersect(
+        shown_columns,
+        names(get_hyperparams_need_tuning(members[[best_variant]]))
+      )
+      shown_grid <- param_grid[
+        param_grid[[VARIANT_COLUMN]] == best_variant,
+        ,
+        drop = FALSE
+      ]
+    }
+    if (length(shown_columns) == 0L) {
+      # A member of a set can win as a whole configuration, with no value
+      # search; its name, in the line above, is then the whole combination.
+      msg(paste0("  ", gray("no hyperparameters searched within this variant")))
+    } else {
+      print_tune_finding(
+        shown_grid[, shown_columns, drop = FALSE],
+        best_param_combo[shown_columns]
+      )
+    }
   }
 
   # Outro ----
@@ -698,16 +611,262 @@ tune_GridSearch <- function(
   # => add optional mods field to GridSearch
   # if (save_mods) mods <- grid_run
   GridSearch(
-    hyperparameters = hyperparameters,
+    # The winning member, so this field always holds a concrete
+    # `Hyperparameters`. `best_variant` says which member it was.
+    hyperparameters = if (is.null(best_variant)) {
+      hyperparameters
+    } else {
+      members[[best_variant]]
+    },
     tuner_config = tuner_config,
     tuning_results = list(
       param_grid = param_grid,
       training = metrics_training_by_combo_id,
-      validation = metrics_validation_by_combo_id
+      validation = metrics_validation_by_combo_id,
+      # Combinations eligible before a randomized search sampled from them.
+      n_combinations = n_combinations_gated,
+      # The resampler as it ran, with settings resolved from the data, such
+      # as the number of stratification intervals.
+      resampler_config = res@config
     ),
-    best_hyperparameters = best_param_combo
+    best_hyperparameters = best_param_combo,
+    best_variant = best_variant,
+    searched_set = if (is.null(members)) NULL else hyperparameters
   )
 } # /rtemis::tune_GridSearch
+
+
+# %% make_grid_cell_runner ----
+#' Build the per-grid-cell body
+#'
+#' Returns the closure `progress_plapply()` dispatches once per (hyperparameter
+#' combination x inner resample) cell.
+#'
+#' @details
+#' Built by a factory, and taking only the cell, for two reasons. Serializing a closure
+#' walks its enclosing environments, so a body defined in `tune_GridSearch()`'s frame
+#' would ship that whole frame to every worker. And a body taking `...` could not be fed
+#' through `progress_plapply()`, whose own `verbosity`, `label` and `kind` parameters
+#' would swallow same-named arguments meant for the cell.
+#'
+#' Under a tolerant failure policy a failure is captured and returned as a marker the
+#' aggregation excludes; under a fatal one it propagates, and the dispatcher stops the
+#' run.
+#'
+#' @param x Tabular data: Training set; each cell slices its own rows.
+#' @param res_param_grid data.frame: One row per cell, `resample_id` plus the
+#' hyperparameter values.
+#' @param hyperparameters `Hyperparameters` or `HyperparametersSet` object.
+#' @param members Optional named list of `Hyperparameters`: the set's members,
+#' or NULL when the search is over a single object. A row is applied to the
+#' member that produced it, which only the member itself knows -- two members
+#' can hold different values for a hyperparameter neither of them tunes.
+#' @param preprocessor_config Optional `SupervisedPreprocessorConfig` object.
+#' @param decomposition_config Optional `DecompositionConfig` object.
+#' @param weights Optional vector of case weights.
+#' @param algorithm Character: Algorithm name, for the algorithm-specific collection.
+#' @param save_mods Logical: If TRUE, the fitted model rides back with the result.
+#' @param fatal Logical: If TRUE, a cell failure is raised; otherwise returned.
+#' @param verbosity Integer: Verbosity level.
+#'
+#' @return Function of `(cell)`, where `cell` is a list with the row number `index` of
+#' `res_param_grid` and its training indices `resample`, returning the cell result list.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+make_grid_cell_runner <- function(
+  x,
+  res_param_grid,
+  hyperparameters,
+  members,
+  preprocessor_config,
+  decomposition_config,
+  weights,
+  algorithm,
+  save_mods,
+  fatal,
+  verbosity
+) {
+  force(x)
+  force(res_param_grid)
+  force(hyperparameters)
+  force(members)
+  force(preprocessor_config)
+  force(decomposition_config)
+  force(weights)
+  force(algorithm)
+  force(save_mods)
+  force(fatal)
+  force(verbosity)
+  function(cell) {
+    index <- cell[["index"]]
+    res1 <- cell[["resample"]]
+    if (verbosity > 1L) {
+      info(
+        "Running grid line #",
+        fmt(index, bold = TRUE),
+        "/",
+        NROW(res_param_grid),
+        "...",
+        caller = "tune_GridSearch"
+      )
+    }
+    dat_train1 <- x[res1, ]
+    weights1 <- weights[res1]
+    dat_valid1 <- x[-res1, ]
+    # A row is applied to the member that produced it, not to "the"
+    # hyperparameters: two members can hold different values for a
+    # hyperparameter neither of them tunes, and only the member knows which.
+    variant1 <- grid_variant(res_param_grid, index)
+    base1 <- if (is.null(variant1)) hyperparameters else members[[variant1]]
+    hyperparams1 <- update(
+      base1,
+      grid_row_values(
+        res_param_grid,
+        index,
+        grid_hyperparameter_columns(res_param_grid)
+      ),
+      tuned = TUNED_STATUS_TUNING # Hyperparameters are being tuned
+    )
+    if (!is.null(variant1)) {
+      hyperparams1@variant <- variant1
+    }
+
+    # Detach any active observability session so the inner train() is opaque to the host
+    # graph; the host host-synthesizes one grid_cell node per cell (uniform across
+    # backends). In daemons the session is already NULL, so this is a harmless no-op.
+    saved_session <- live[["session"]]
+    live[["session"]] <- NULL
+    on.exit(live[["session"]] <- saved_session, add = TRUE)
+    run_cell <- function() {
+      do_call(
+        "train",
+        args = list(
+          x = dat_train1,
+          dat_validation = dat_valid1,
+          preprocessor_config = preprocessor_config,
+          decomposition_config = decomposition_config,
+          hyperparameters = hyperparams1,
+          weights = weights1,
+          verbosity = verbosity - 1L
+        ),
+        verbosity = verbosity
+      )
+    }
+    # Failure policy (specs/observability.md section 7): under a tolerant policy a
+    # grid-cell failure is captured and returned as a marker (non-fatal); otherwise it
+    # propagates. Timestamps bracket the actual cell run so the host can record real
+    # durations on the synthesized grid_cell nodes.
+    cell_t_start <- Sys.time()
+    mod1 <- if (fatal) {
+      run_cell()
+    } else {
+      tryCatch(run_cell(), error = function(e) e)
+    }
+    cell_t_end <- Sys.time()
+    if (inherits(mod1, "condition")) {
+      return(list(
+        id = index,
+        resample_id = res_param_grid[index, "resample_id"],
+        metrics_training = NULL,
+        metrics_validation = NULL,
+        type = NA_character_,
+        hyperparameters = hyperparams1,
+        failed = TRUE,
+        error = conditionMessage(mod1),
+        t_start = cell_t_start,
+        t_end = cell_t_end
+      ))
+    }
+
+    out1 <- list(
+      id = index,
+      resample_id = res_param_grid[index, "resample_id"],
+      metrics_training = mod1@metrics_training,
+      metrics_validation = mod1@metrics_validation,
+      type = mod1@type,
+      hyperparameters = hyperparams1,
+      failed = FALSE,
+      t_start = cell_t_start,
+      t_end = cell_t_end
+    )
+
+    # Algorithm-specific params ----
+    # => add to hyperparameters
+    if (algorithm == "GLMNET") {
+      out1[["hyperparameters"]]@hyperparameters[["lambda.min"]] <- mod1@model[[
+        "lambda.min"
+      ]]
+      out1[["hyperparameters"]]@hyperparameters[["lambda.1se"]] <- mod1@model[[
+        "lambda.1se"
+      ]]
+    }
+    if (algorithm == "LightGBM") {
+      # Check best_iter is meaningful, otherwise issue message and set to 100L
+      best_iter <- mod1@model[["best_iter"]]
+      if (is.null(best_iter) || best_iter == -1 || best_iter == 0) {
+        info(
+          paste(
+            "best_iter returned from lightgbm:",
+            best_iter,
+            "- setting to 100L"
+          )
+        )
+        best_iter <- 100L
+      }
+      out1[["hyperparameters"]]@hyperparameters[["best_iter"]] <- best_iter
+    }
+    if (algorithm == "LINAD") {
+      # The size this cell's validation fold selected. Without capturing it the
+      # final fit -- which gets no validation set -- keeps every leaf it grew.
+      out1[["hyperparameters"]]@hyperparameters[["best_n_leaves"]] <-
+        as.integer(mod1@model@n_leaves)
+    }
+    if (save_mods) {
+      out1[["mod1"]] <- mod1
+    }
+    out1
+  }
+} # /rtemis::make_grid_cell_runner
+
+
+# %% normalize_cell_result ----
+#' Normalize one grid cell result
+#'
+#' The cell body returns a structured result, failure included. A condition arrives
+#' instead only when the dispatch itself failed -- a payload that could not be serialized,
+#' or a worker that died -- which is outside the body's own `tryCatch`. Both shapes are
+#' flattened here so the node synthesis and metric aggregation downstream have one thing
+#' to read.
+#'
+#' @param res List or condition: One element of the `progress_plapply()` result.
+#' @param index Integer: Cell index, used when the result carries no id of its own.
+#' @param resample_id Integer: Inner resample the cell belonged to.
+#'
+#' @return List in the cell result shape.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+normalize_cell_result <- function(res, index, resample_id) {
+  if (!inherits(res, "condition")) {
+    return(res)
+  }
+  now <- Sys.time()
+  list(
+    id = index,
+    resample_id = resample_id,
+    metrics_training = NULL,
+    metrics_validation = NULL,
+    type = NA_character_,
+    hyperparameters = NULL,
+    failed = TRUE,
+    error = conditionMessage(res),
+    t_start = now,
+    t_end = now
+  )
+} # /rtemis::normalize_cell_result
 
 
 # %% print_tune_finding ----
@@ -716,22 +875,186 @@ tune_GridSearch <- function(
 #' Prints set of search values and best value in the form {1, 3, 5} => 3
 #' for each hyperparameter that was tuned.
 #'
+#' Reads the searched values off the grid, so that a hyperparameter a gate added
+#' to it -- one held at a single value, but dropped from the combinations that
+#' cannot use it -- is reported too. Both grid markers for an unset value print
+#' as the NULL they become: NA from a closed gate, and `expand_grid()`'s "null"
+#' sentinel from a hyperparameter left to be determined by tuning.
+#'
+#' @param param_grid data.frame: The tuning grid, without its `param_combo_id`
+#'   column.
+#' @param best_param_combo Named list: The winning combination.
+#' @param pad Integer: Label column width.
+#'
 #' @author EDG
 #' @keywords internal
 #' @noRd
-print_tune_finding <- function(grid_params, best_param_combo, pad = 22L) {
+print_tune_finding <- function(param_grid, best_param_combo, pad = 22L) {
+  show <- function(x) {
+    # A container tunable's candidate is a whole vector -- one architecture, one
+    # per grid cell -- so it is parenthesized to stay legible beside the scalar
+    # hyperparameters printed on the same line.
+    if (length(x) == 0L) {
+      return("NULL")
+    }
+    if (length(x) > 1L) {
+      return(paste0("(", paste(x, collapse = ", "), ")"))
+    }
+    if (is.na(x) || identical(x, "null")) "NULL" else as.character(x)
+  }
   # Make list of search values and best value
-  tfl <- lapply(seq_along(grid_params), function(i) {
+  tfl <- lapply(names(param_grid), function(nm) {
     paste0(
       "{",
-      paste(grid_params[[i]], collapse = ", "),
+      paste(
+        vapply(unique(param_grid[[nm]]), show, character(1L)),
+        collapse = ", "
+      ),
       "}",
       " => ",
-      bold(best_param_combo[[names(grid_params)[i]]])
+      bold(show(best_param_combo[[nm]]))
     )
   })
-  names(tfl) <- names(grid_params)
+  names(tfl) <- names(param_grid)
   # Capture output to sync with msg stream (stderr)
   out <- utils::capture.output(printls(tfl, print_class = FALSE, pad = pad))
   message(paste(out, collapse = "\n"))
 } # /rtemis::print_tune_finding
+
+
+# %% tuning_grid_summary ----
+#' What a grid search will fit, before it fits anything
+#'
+#' The counts a run announces, derived without building the grid a second time
+#' or drawing the randomized sample. `train()` reads this to announce a search
+#' it is about to run inside outer resampling folds, where each fold's own
+#' announcement is silenced; `tune_GridSearch()` reads the same values, so the
+#' two can never describe different searches.
+#'
+#' @param hyperparameters Hyperparameters or HyperparametersSet object.
+#' @param tuner_config TunerConfig object.
+#'
+#' @return List with `n_members`, `n_combinations_expanded`,
+#' `n_combinations_gated`, `n_param_combinations`, `gated_params`,
+#' `n_resamples` and `n_models`.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+tuning_grid_summary <- function(hyperparameters, tuner_config) {
+  members <- tuning_members(hyperparameters)
+  # A set's expansion is the sum of its members'.
+  n_combinations_expanded <- if (is.null(members)) {
+    prod(pmax(lengths(get_hyperparams_need_tuning(hyperparameters)), 1L))
+  } else {
+    sum(vapply(
+      members,
+      function(member) {
+        prod(pmax(lengths(get_hyperparams_need_tuning(member)), 1L))
+      },
+      numeric(1L)
+    ))
+  }
+  grid <- tuning_grid(hyperparameters)
+  n_combinations_gated <- NROW(grid)
+  # Rounding can reach 0 on a small grid.
+  n_param_combinations <- if (
+    identical(tuner_config[["search_type"]], "randomized")
+  ) {
+    max(1L, round(tuner_config[["randomize_p"]] * n_combinations_gated))
+  } else {
+    n_combinations_gated
+  }
+  n_resamples <- tuner_config[["resampler_config"]][["n_resamples"]]
+  list(
+    n_members = if (is.null(members)) NULL else length(members),
+    n_combinations_expanded = n_combinations_expanded,
+    n_combinations_gated = n_combinations_gated,
+    n_param_combinations = n_param_combinations,
+    # NA marks a combination a gate excluded the hyperparameter from, so the
+    # columns holding one are exactly those the grid made conditional.
+    gated_params = names(grid)[vapply(grid, anyNA, logical(1L))],
+    n_resamples = n_resamples,
+    n_models = n_param_combinations * n_resamples
+  )
+} # /rtemis::tuning_grid_summary
+
+
+# %% tuning_intro ----
+#' Announce a grid search
+#'
+#' @param summary List: `tuning_grid_summary()` output.
+#' @param algorithm Character: Algorithm name.
+#' @param tuner_config TunerConfig object.
+#' @param verbosity Integer: Verbosity level.
+#'
+#' @return NULL, invisibly.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+tuning_intro <- function(summary, algorithm, tuner_config, verbosity = 1L) {
+  if (verbosity < 1L) {
+    return(invisible(NULL))
+  }
+  n_members <- summary[["n_members"]]
+  n_combinations <- summary[["n_param_combinations"]]
+  gated_params <- summary[["gated_params"]]
+  msg0(
+    fmt("<> ", col = col_tuner, bold = TRUE),
+    "Tuning ",
+    algorithm,
+    " by ",
+    tuner_config[["search_type"]],
+    " grid search with ",
+    desc(tuner_config@config[["resampler_config"]]),
+    "..."
+  )
+  msg0(
+    # A set's combinations are spread across its members, and the count alone
+    # does not say so: two members that differ only in a hyperparameter neither
+    # tunes produce grid rows identical in every column but `.variant`, so six
+    # combinations can look like fewer.
+    if (is.null(n_members)) {
+      ""
+    } else {
+      paste0(
+        fmt(n_members, col = col_tuner, bold = TRUE),
+        ngettext(n_members, " variant, ", " variants, ")
+      )
+    },
+    fmt(n_combinations, col = col_tuner, bold = TRUE),
+    ngettext(
+      n_combinations,
+      " parameter combination x ",
+      " parameter combinations x "
+    ),
+    fmt(summary[["n_resamples"]], col = col_tuner, bold = TRUE),
+    " resamples: ",
+    fmt(summary[["n_models"]], col = col_tuner, bold = TRUE),
+    " models total",
+    " (",
+    Sys.getenv("R_PLATFORM"),
+    ")."
+  )
+  # Reported against the gated count, which isolates the gate's reduction from
+  # a randomized search's sampling.
+  if (
+    summary[["n_combinations_gated"]] < summary[["n_combinations_expanded"]]
+  ) {
+    msg0(
+      "Conditional grid: ",
+      fmt(summary[["n_combinations_expanded"]], col = col_tuner, bold = TRUE),
+      " combinations reduced to ",
+      fmt(summary[["n_combinations_gated"]], col = col_tuner, bold = TRUE),
+      "; ",
+      oxfordcomma(gated_params),
+      ngettext(
+        length(gated_params),
+        " does not apply to every combination.",
+        " do not apply to every combination."
+      )
+    )
+  }
+  invisible(NULL)
+} # /rtemis::tuning_intro

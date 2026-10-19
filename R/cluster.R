@@ -14,23 +14,34 @@
 #' are cases to be clustered), or a `ClusterConfig` recipe (from
 #' [setup_ClusterConfig]) carrying the data path, algorithm config, and output
 #' directory.
-#' @param algorithm Character: Clustering algorithm.
-#' @param config List: Algorithm-specific config.
+#' @param algorithm Character: Clustering algorithm. Not needed when `config` is
+#' supplied, which names its own; an explicit `algorithm` that disagrees with
+#' `config` is an error.
+#' @param config `ClusteringConfig`, optional: Algorithm-specific config from a
+#' clustering `setup_*` function. Its `features` selects the columns to cluster
+#' on; `NULL` selects every numeric column of `x`, since a clustering backend
+#' reads numbers. The returned object's config carries the resolved names.
+#' @param execution_config `ExecutionConfig` object: Execution settings, e.g.
+#' [setup_FutureExecution] or [setup_SerialExecution]. A clustering dispatches
+#' no work to other processes and no registered algorithm threads, so the fit
+#' runs on one thread; the config's `seed` seeds it.
 #' @param outdir Character, optional: Output directory. If not NULL, the returned
-#' `Clustering` object is saved there as an `.rds` file.
+#' `Clustering` object is saved there as an `.rds` file, alongside a run record
+#' (`cluster_<algorithm>.record.json`) stating what the run resolved. See
+#' [write_record].
 #' @param verbosity Integer: Verbosity level.
 #'
 #' @return `Clustering` object.
 #'
 #' @author EDG
 #' @export
-#'
 #' @examples
 #' iris_km <- cluster(exc(iris, "Species"), algorithm = "KMeans")
 cluster <- function(
   x,
   algorithm = "KMeans",
   config = NULL,
+  execution_config = setup_FutureExecution(),
   outdir = NULL,
   verbosity = 1L
 ) {
@@ -45,29 +56,57 @@ cluster <- function(
         class = c("rtemis_null_input", "rtemis_input_error")
       )
     }
-    # The algorithm label prefers an explicit top-level `algorithm`, falling back
-    # to the one carried by `clustering_config`, then the formal default.
-    algorithm <- x@algorithm
-    if (is.null(algorithm) && !is.null(x@clustering_config)) {
-      algorithm <- x@clustering_config@algorithm
-    }
-    if (is.null(algorithm)) {
-      algorithm <- "KMeans"
-    }
+    # The document names the algorithm in one place, its `clustering_config`;
+    # with none, the formal default below applies.
     return(cluster(
       x = read(x@dat_path),
-      algorithm = algorithm,
       config = x@clustering_config,
+      execution_config = x@execution_config,
       outdir = x@outdir,
       verbosity = x@verbosity
     ))
   } # / cluster.ClusterConfig
 
   # Checks ----
+  # A supplied config names its algorithm; `algorithm` then serves only to catch
+  # a caller naming a different one.
   if (is.null(config)) {
     config <- get_default_clusterparams(algorithm)
+  } else {
+    check_is_S7(config, ClusteringConfig)
+    if (!missing(algorithm) && .get_clust_name(algorithm) != config@algorithm) {
+      rtemis.core::abort(
+        "`algorithm` is \"",
+        algorithm,
+        "\" but `config` is a ",
+        config@algorithm,
+        " config; pass one or the other.",
+        class = c("rtemis_value_error", "rtemis_input_error")
+      )
+    }
+    algorithm <- config@algorithm
   }
-  check_is_S7(config, ClusteringConfig)
+  check_is_S7(execution_config, ExecutionConfig)
+
+  # Feature selection ----
+  # The config's `features` is the record's account of which columns were
+  # clustered, so the fit must use exactly those. Unset means every numeric
+  # column, resolved here and written back to the config: a clustering backend
+  # reads numbers, and handing it a date column because the caller did not
+  # enumerate a hundred names is a run that fails on data any other interface
+  # clusters without being asked. `train()` resolves its decomposition step the
+  # same way, and `decomp()` now does too, so one rule covers all three.
+  x <- as.data.frame(x)
+  if (is.null(config@features)) {
+    config@features <- resolve_unsupervised_features(x, "Clustering")
+  }
+  # Against the frame as supplied, so that `features` is checked against every
+  # column the caller has and a per-case setting against every row. Both
+  # paths, because a bound that is not about the feature selection -- CMeans'
+  # per-case `weights` -- is wrong just as often when the selection was left
+  # to us.
+  check_data_bounds(config, x, has_outcome = FALSE)
+  x <- x[, config@features, drop = FALSE]
 
   # Intro ----
   start_time <- intro(verbosity = verbosity)
@@ -77,26 +116,61 @@ cluster <- function(
     summarize_unsupervised(x)
   }
 
+  # Resources ----
+  # Nothing is dispatched and no clustering backend threads, so the algorithm
+  # runs on one thread whatever the config allows; the line states both.
+  algorithm <- .get_clust_name(algorithm)
+  msg_resources(
+    backend = execution_backend_label(execution_config),
+    n_workers = execution_n_workers(execution_config),
+    workers = list(algorithm = 1L),
+    explicit = FALSE,
+    device = device_label(
+      "cpu",
+      requested = execution_config@device,
+      algorithm = algorithm,
+      chooses = FALSE
+    ),
+    verbosity = verbosity
+  )
+
   # Cluster ----
-  algorithm <- get_clust_name(algorithm)
   msg0(
     bold(paste0("Clustering with ", algorithm, "...")),
     verbosity = verbosity
   )
-  clust <- cluster_(config = config, x = x, verbosity = verbosity)
+  # Seeded from the execution config, which records the seed, so the fit
+  # reproduces from its record; the caller's random stream is restored after.
+  clust <- with_seed(
+    execution_config@seed,
+    cluster_(
+      config = config,
+      x = x,
+      execution_config = execution_config,
+      verbosity = verbosity
+    )
+  )
 
   # Clusters ----
   clusters <- do_call(
     fn = get_clustpredict_fn(algorithm),
-    args = list(clust = clust)
+    args = list(clust = clust),
+    verbosity = verbosity
   )
+
+  # Soft algorithms carry a weight per cluster per case; the rest do not, and
+  # that is what selects the result variant below.
+  membership <- cluster_membership(config = config, clust = clust)
 
   if (!is.null(config[["k"]])) {
     # For algorithms where k is specified in config
     k <- config[["k"]]
   } else {
-    # For algorithms where k is not prescribed, but determined from the clustering result
-    k <- length(unique(clusters))
+    # For algorithms where k is not prescribed but determined by the fit. Each
+    # algorithm reports its own fitted count: distinct labels answer that for
+    # some backends and not others, over-counting a noise sentinel and
+    # under-counting a cluster that won no case.
+    k <- cluster_k(config = config, clust = clust)
     if (verbosity > 0L) {
       msg0(paste0("Found ", highlight(k), " clusters."))
     }
@@ -104,13 +178,54 @@ cluster <- function(
 
   # Outro ----
   outro(start_time, verbosity = verbosity)
-  out <- Clustering(
-    algorithm = algorithm,
-    clust = clust,
-    k = k,
-    clusters = clusters,
-    config = config
+  # `Clustering` is abstract: every result is one variant or the other, and
+  # which one follows from whether the algorithm produced a membership matrix.
+  out <- if (is.null(membership)) {
+    HardClustering(
+      algorithm = algorithm,
+      clust = clust,
+      k = k,
+      clusters = clusters,
+      config = config
+    )
+  } else {
+    SoftClustering(
+      algorithm = algorithm,
+      clust = clust,
+      k = k,
+      clusters = clusters,
+      config = config,
+      membership = membership
+    )
+  }
+
+  # Cheap measures only, computed inline as `decomp()` does. See
+  # `compute_clustering_metrics()` for the measures computed.
+  out@metrics <- compute_clustering_metrics(out)
+
+  # `cluster()` fits every column it is given, so the input frame is the data
+  # the run used. Reduced to a matrix like `decomp()` does, for the same reason
+  # and one more: an "object" hash sees the container, so without it the same
+  # data clustered as a data.table and decomposed as a data.frame would record
+  # two different `data_training` hashes, and comparing runs across a batch is
+  # what a fingerprint is for. Lossless because every `cluster_` method has
+  # already run `check_unsupervised_data()`, which rejects a non-numeric column;
+  # a method that skipped it would let one through to be coerced silently here.
+  out@data_fingerprint <- data_fingerprint(as.matrix(x))
+
+  # See `decomp()`: the run's input, which `@config` alone cannot supply.
+  # `outdir` is omitted when unset so the config's own default applies; passing
+  # NULL is rejected, and the record reports the default with origin
+  # `default`, meaning the caller did not choose one.
+  input_args <- list(
+    clustering_config = config,
+    execution_config = execution_config,
+    verbosity = max(0L, verbosity)
   )
+  if (!is.null(outdir)) {
+    input_args[["outdir"]] <- outdir
+  }
+  out@cluster_config <- do.call(setup_ClusterConfig, input_args)
 
   # Write ----
   if (!is.null(outdir)) {
@@ -118,6 +233,12 @@ cluster <- function(
       out,
       outdir = outdir,
       file_prefix = paste0("cluster_", algorithm),
+      verbosity = verbosity
+    )
+    write_record(
+      out,
+      file.path(outdir, paste0("cluster_", algorithm, ".record.json")),
+      overwrite = TRUE,
       verbosity = verbosity
     )
   }

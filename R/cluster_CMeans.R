@@ -7,7 +7,12 @@
 #'
 #' @keywords internal
 #' @noRd
-method(cluster_, CMeansConfig) <- function(config, x, verbosity = 1L) {
+method(cluster_, CMeansConfig) <- function(
+  config,
+  x,
+  execution_config = NULL,
+  verbosity = 1L
+) {
   # Dependencies ----
   check_dependencies("e1071")
 
@@ -31,6 +36,19 @@ method(cluster_, CMeansConfig) <- function(config, x, verbosity = 1L) {
   check_inherits(clust, "fclust")
   clust
 } # /rtemis::cluster_.CMeansConfig
+
+
+# %% cluster_membership.CMeansConfig ----
+# `cmeans()` returns memberships with column j holding cluster j's weight, and
+# `$cluster` is the argmax of that matrix, so the backend's order is already
+# rtemis' label order and no permutation is needed. `SoftClustering`'s validator
+# checks that correspondence.
+#
+#' @keywords internal
+#' @noRd
+method(cluster_membership, CMeansConfig) <- function(config, clust) {
+  clust[["membership"]]
+} # /rtemis::cluster_membership.CMeansConfig
 
 
 # %% clustpredict_CMeans ----

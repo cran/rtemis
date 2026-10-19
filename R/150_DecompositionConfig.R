@@ -1,0 +1,1453 @@
+# 150_DecompositionConfig.R
+# ::rtemis::
+# 2025- EDG rtemis.org
+
+# Architecture ----
+# Mirrors 070_Hyperparameters.R: each `*Config` subclass declares its
+# algorithm parameters with the `prop_*` factories, from which the S7
+# validators, the `config` list, and the JSON Schema (S7_to_JSONSchema) are
+# generated. The abstract `DecompositionConfig` superclass provides the
+# computed `config` list (assembled from the subclass's own properties;
+# assignment routes back to them) and carries the algorithm-agnostic
+# `features` selection. Decomposition has no tuning, so every parameter is a
+# fixed scalar (or, for `features`, a plain vector). Parameters whose R type
+# cannot be expressed as a JSON type (tSNE `Y_init`, a matrix) are plain
+# properties: stored and validated by class, but excluded from schemas.
+
+# %% DecompositionConfig ----
+#' DecompositionConfig
+#'
+#' @description
+#' Abstract superclass for decomposition configs. Subclasses declare each
+#' algorithm parameter as a property; this class contributes the computed
+#' `config` list and the `features` selection.
+#'
+#' @field algorithm Character: Algorithm name (computed constant, overridden
+#'   per subclass).
+#' @field features Optional Character vector: Names of at least 2 distinct
+#'   feature columns to decompose. `NULL` means all numeric features.
+#' @field config List: Algorithm-specific parameters (computed from the
+#'   subclass's properties; assignment routes back and validates).
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+DecompositionConfig <- schema_class(
+  name = "DecompositionConfig",
+  package = "rtemis",
+  abstract = TRUE,
+  properties = list(
+    algorithm = class_character,
+    # A subset is only a subset if it names at least two distinct columns:
+    # decomposing one feature is degenerate, and a repeat would duplicate a
+    # column in the input matrix.
+    features = prop_string(
+      NULL,
+      nullable = TRUE,
+      vector = TRUE,
+      min_items = 2L,
+      unique_items = TRUE,
+      data_bound = "numeric_feature_names",
+      description = paste(
+        "Names of the feature columns to decompose. null = all numeric",
+        "features."
+      )
+    ),
+    config = new_property(
+      class_list,
+      getter = function(self) {
+        own_prop_values(self, DecompositionConfig)
+      },
+      setter = function(self, value) {
+        route_config_assignment(self, DecompositionConfig, value)
+      }
+    )
+  ),
+  publication = SchemaPublication(
+    role = "family",
+    slug = "decomposition",
+    title = "rtemis DecompositionConfig",
+    description = "Language-independent config for an rtemis decomposition (dimensionality reduction). Mirrors the `DecompositionConfig` object: an algorithm name, its settings, and an optional feature subset. The same config drives rtemis (R), rtemis CLI/shell, and rtemislive to identical output.",
+    discriminator = "algorithm",
+    discriminator_description = "Decomposition algorithm name.",
+    order = 1L
+  )
+) # /rtemis::DecompositionConfig
+
+
+# %% serializable_props.DecompositionConfig ----
+# `algorithm`, then `features` (declared on the base, so shared by every
+# algorithm), then the algorithm's settings as siblings -- the shape the
+# decomposition schema declares. The computed `config` list is not written: it
+# is a view of the same properties.
+method(serializable_props, DecompositionConfig) <- function(x) {
+  dispatched_props(x, DecompositionConfig, "algorithm")
+} # /rtemis::serializable_props.DecompositionConfig
+
+
+# %% `$`.DecompositionConfig ----
+# Make DecompositionConfig@config@name `$`-accessible ----
+method(`$`, DecompositionConfig) <- function(x, name) {
+  x@config[[name]]
+}
+
+
+# %% `.DollarNames`.DecompositionConfig ----
+# `$`-autocomplete DecompositionConfig@config ----
+method(`.DollarNames`, DecompositionConfig) <- function(x, pattern = "") {
+  all_names <- names(x@config)
+  grep(pattern, all_names, value = TRUE)
+}
+
+
+# %% `[`.DecompositionConfig ----
+# Make props `[`-accessible ----
+method(`[`, DecompositionConfig) <- function(x, name) {
+  props(x)[[name]]
+}
+
+
+# %% `[[`.DecompositionConfig ----
+# Make DecompositionConfig@config@name `[[`-accessible ----
+method(`[[`, DecompositionConfig) <- function(x, name) {
+  x@config[[name]]
+}
+
+
+# %% repr.DecompositionConfig ----
+#' Show Method for DecompositionConfig
+#'
+#' @param object DecompositionConfig object.
+#' @param pad Integer: Left side padding.
+#' @param output_type Character {"ansi", "html", or "plain"}: Output type.
+#'
+#' @return character
+#'
+#' @author EDG
+#' @noRd
+method(repr, DecompositionConfig) <- function(
+  x,
+  pad = 0L,
+  output_type = NULL
+) {
+  features <- x["features"]
+  config <- x["config"]
+  if (!is.null(features)) {
+    config <- c(config, list(features = features))
+  }
+  paste0(
+    repr_S7name(
+      paste(x["algorithm"], "DecompositionConfig"),
+      pad = pad,
+      output_type = output_type
+    ),
+    repr_ls(config, pad = pad, limit = -1L, output_type = output_type)
+  )
+} # /rtemis::repr.DecompositionConfig
+
+
+# %% print.DecompositionConfig ----
+#' Print Method for DecompositionConfig
+#'
+#' @param x DecompositionConfig object.
+#' @param pad Integer: Left side padding.
+#' @param ... Not used.
+#'
+#' @return DecompositionConfig object, invisibly.
+#'
+#' @author EDG
+#' @noRd
+method(print, DecompositionConfig) <- function(
+  x,
+  pad = 0L,
+  output_type = NULL,
+  ...
+) {
+  cat(repr(x, pad = pad, output_type = output_type))
+  invisible(x)
+}
+
+
+# %% PCAConfig ----
+#' @title PCAConfig
+#'
+#' @description
+#' DecompositionConfig subclass for Principal Component Analysis.
+#'
+#' @author EDG
+#' @noRd
+PCAConfig <- schema_class(
+  name = "PCAConfig",
+  parent = DecompositionConfig,
+  properties = list(
+    algorithm = prop_algorithm("PCA"),
+    k = prop_integer(
+      3L,
+      min = 1L,
+      description = "Number of components to extract."
+    ),
+    center = prop_boolean(TRUE, description = "Center the data."),
+    scale = prop_boolean(TRUE, description = "Scale the data."),
+    tol = prop_float(
+      NULL,
+      min = 0,
+      nullable = TRUE,
+      description = "Magnitude tolerance below which components are omitted."
+    )
+  ),
+  publication = SchemaPublication(
+    role = "leaf",
+    description = "Principal Component Analysis.",
+    order = 1L
+  )
+) # /rtemis::PCAConfig
+
+
+# %% setup_PCA ----
+#' Setup PCA config.
+#'
+#' @param k Integer [1, Inf): Number of components. (passed to `prcomp` `rank.`)
+#' @param center Logical: If TRUE, center the data.
+#' @param scale Logical: If TRUE, scale the data.
+#' @param tol Optional Numeric [0, Inf): Tolerance.
+#' @param features Optional Character vector: Names of at least 2 distinct
+#'   feature columns to decompose. `NULL` decomposes all numeric features.
+#'
+#' @return PCAConfig object.
+#'
+#' @author EDG
+#' @export
+#' @examples
+#' pca_config <- setup_PCA(k = 3L)
+#' pca_config
+setup_PCA <- function(
+  k = 3L,
+  center = TRUE,
+  scale = TRUE,
+  tol = NULL,
+  features = NULL
+) {
+  apply_setup_defaults(PCAConfig)
+  k <- clean_posint(k)
+  PCAConfig(
+    k = k,
+    center = center,
+    scale = scale,
+    tol = tol,
+    features = features
+  )
+} # /rtemis::setup_PCA
+
+
+# %% ICAConfig ----
+#' @title ICAConfig
+#'
+#' @description
+#' DecompositionConfig subclass for Independent Component Analysis.
+#'
+#' @author EDG
+#' @noRd
+ICAConfig <- schema_class(
+  name = "ICAConfig",
+  parent = DecompositionConfig,
+  properties = list(
+    algorithm = prop_algorithm("ICA"),
+    k = prop_integer(
+      3L,
+      min = 1L,
+      description = "Number of components to extract."
+    ),
+    type = prop_string(
+      "parallel",
+      enum = c("parallel", "deflation"),
+      description = "Component extraction scheme."
+    ),
+    fun = prop_string(
+      "logcosh",
+      enum = c("logcosh", "exp"),
+      description = "Functional form of the approximation to neg-entropy."
+    ),
+    alpha = prop_float(
+      1.0,
+      min = 1,
+      max = 2,
+      description = "Used with `fun = \"logcosh\"`."
+    ),
+    row_norm = prop_boolean(
+      TRUE,
+      description = "Standardize each case across features before ICA."
+    ),
+    maxit = prop_integer(
+      100L,
+      min = 1L,
+      description = "Maximum number of iterations."
+    ),
+    tol = prop_float(1e-04, min = 0, description = "Convergence tolerance.")
+  ),
+  publication = SchemaPublication(
+    role = "leaf",
+    description = "Independent Component Analysis.",
+    order = 2L
+  )
+) # /rtemis::ICAConfig
+
+
+# %% setup_ICA ----
+#' @title setup_ICA
+#'
+#' @description
+#' Setup ICA config.
+#'
+#' @param k Integer [1, Inf): Number of components.
+#' @param type Character \{"parallel", "deflation"\}: Type of ICA.
+#' @param fun Character \{"logcosh", "exp"\}: ICA function.
+#' @param alpha Numeric \[1, 2\]: Used in approximation to neg-entropy with `fun = "logcosh"`.
+#' @param row_norm Logical: If TRUE, standardize each case across features
+#' before ICA, i.e. subtract each case's mean and divide by its standard
+#' deviation. Appropriate when the features share units and each case's overall
+#' level and scale are a nuisance rather than signal, as for spectra or assays
+#' whose total intensity varies by sample -- the usual situation for the wide,
+#' single-instrument matrices decomposition is run on, which is why it is the
+#' default. It spends two degrees of freedom per case, so its cost is roughly
+#' `2 / ncol(x)`: negligible for hundreds of features, but substantial for a
+#' handful, where each case's level and scale are more likely to be signal.
+#' Set FALSE for narrow or mixed-unit data.
+#' @param maxit Integer [1, Inf): Maximum number of iterations.
+#' @param tol Numeric [0, Inf): Tolerance.
+#' @param features Optional Character vector: Names of at least 2 distinct
+#'   feature columns to decompose. `NULL` decomposes all numeric features.
+#'
+#' @return ICAConfig object.
+#'
+#' @author EDG
+#' @export
+#' @examples
+#' ica_config <- setup_ICA(k = 3L)
+#' ica_config
+setup_ICA <- function(
+  k = 3L,
+  type = "parallel",
+  fun = "logcosh",
+  alpha = 1.0,
+  row_norm = TRUE,
+  maxit = 100L,
+  tol = 1e-04,
+  features = NULL
+) {
+  apply_setup_defaults(ICAConfig)
+  k <- clean_posint(k)
+  maxit <- clean_posint(maxit)
+  ICAConfig(
+    k = k,
+    type = type,
+    fun = fun,
+    alpha = alpha,
+    row_norm = row_norm,
+    maxit = maxit,
+    tol = tol,
+    features = features
+  )
+} # /rtemis::setup_ICA
+
+
+# %% NMFConfig ----
+#' @title NMFConfig
+#'
+#' @description
+#' DecompositionConfig subclass for Non-negative Matrix Factorization.
+#'
+#' @author EDG
+#' @noRd
+NMFConfig <- schema_class(
+  name = "NMFConfig",
+  parent = DecompositionConfig,
+  properties = list(
+    algorithm = prop_algorithm("NMF"),
+    k = prop_integer(
+      2L,
+      min = 1L,
+      description = "Number of components to extract."
+    ),
+    method = prop_string(
+      "brunet",
+      description = "NMF method."
+    ),
+    nrun = prop_integer(
+      1L,
+      min = 1L,
+      description = "Number of runs to perform."
+    )
+  ),
+  publication = SchemaPublication(
+    role = "leaf",
+    description = "Non-negative Matrix Factorization.",
+    order = 3L
+  )
+) # /rtemis::NMFConfig
+
+
+# %% setup_NMF ----
+#' Setup NMF config.
+#'
+#' @param k Integer [1, Inf): Number of components.
+#' @param method Character: NMF method. See `NMF::nmf`.
+#' @param nrun Integer [1, Inf): Number of runs to perform.
+#' @param features Optional Character vector: Names of at least 2 distinct
+#'   feature columns to decompose. `NULL` decomposes all numeric features.
+#'
+#' @return NMFConfig object.
+#'
+#' @author EDG
+#' @export
+#' @examples
+#' nmf_config <- setup_NMF(k = 3L)
+#' nmf_config
+setup_NMF <- function(
+  k = 2L,
+  method = "brunet",
+  nrun = 1L,
+  features = NULL
+) {
+  apply_setup_defaults(NMFConfig)
+  k <- clean_posint(k)
+  nrun <- clean_posint(nrun)
+  NMFConfig(k = k, method = method, nrun = nrun, features = features)
+} # /rtemis::setup_NMF
+
+
+# %% UMAPConfig ----
+#' @title UMAPConfig
+#'
+#' @description
+#' DecompositionConfig subclass for Uniform Manifold Approximation and Projection.
+#'
+#' @author EDG
+#' @noRd
+UMAPConfig <- schema_class(
+  name = "UMAPConfig",
+  parent = DecompositionConfig,
+  properties = list(
+    algorithm = prop_algorithm("UMAP"),
+    k = prop_integer(
+      2L,
+      min = 1L,
+      description = "Number of components to extract."
+    ),
+    n_neighbors = prop_integer(
+      15L,
+      min = 1L,
+      description = "Number of neighbors."
+    ),
+    init = prop_string(
+      "spectral",
+      description = "Initialization type for the embedding."
+    ),
+    metric = prop_string(
+      "euclidean",
+      enum = c("euclidean", "cosine", "manhattan", "hamming", "categorical"),
+      description = "Distance metric."
+    ),
+    n_epochs = prop_integer(
+      NULL,
+      min = 1L,
+      nullable = TRUE,
+      description = "Number of epochs. Unset uses the algorithm's default."
+    ),
+    learning_rate = prop_float(1.0, min = 0, description = "Learning rate."),
+    scale = prop_boolean(TRUE, description = "Scale input data before UMAP.")
+  ),
+  publication = SchemaPublication(
+    role = "leaf",
+    description = "Uniform Manifold Approximation and Projection.",
+    order = 4L
+  )
+) # /rtemis::UMAPConfig
+
+
+# %% setup_UMAP ----
+#' Setup UMAP config.
+#'
+#' @details
+#' A high `n_neighbors` value may give error in some systems:
+#' "Error in irlba::irlba(L, nv = n, nu = 0, maxit = iters) :
+#'  function 'as_cholmod_sparse' not provided by package 'Matrix'"
+#'
+#' @param k Integer [1, Inf): Number of components.
+#' @param n_neighbors Integer [1, Inf): Number of neighbors.
+#' @param init Character: Initialization type. See `uwot::umap "init"`.
+#' @param metric Character \{"euclidean", "cosine", "manhattan", "hamming", "categorical"\}: Distance metric.
+#' @param n_epochs Optional Integer [1, Inf): Number of epochs.
+#' @param learning_rate Numeric [0, Inf): Learning rate.
+#' @param scale Logical: If TRUE, scale input data before doing UMAP.
+#' @param features Optional Character vector: Names of at least 2 distinct
+#'   feature columns to decompose. `NULL` decomposes all numeric features.
+#'
+#' @return UMAPConfig object.
+#'
+#' @author EDG
+#' @export
+#' @examples
+#' umap_config <- setup_UMAP(k = 3L)
+#' umap_config
+setup_UMAP <- function(
+  k = 2L,
+  n_neighbors = 15L,
+  init = "spectral",
+  metric = "euclidean",
+  n_epochs = NULL,
+  learning_rate = 1.0,
+  scale = TRUE,
+  features = NULL
+) {
+  apply_setup_defaults(UMAPConfig)
+  k <- clean_posint(k)
+  n_neighbors <- clean_posint(n_neighbors)
+  n_epochs <- clean_posint(n_epochs)
+  UMAPConfig(
+    k = k,
+    n_neighbors = n_neighbors,
+    init = init,
+    metric = metric,
+    n_epochs = n_epochs,
+    learning_rate = learning_rate,
+    scale = scale,
+    features = features
+  )
+} # /rtemis::setup_UMAP
+
+
+# %% tSNEConfig ----
+#' @title tSNEConfig
+#'
+#' @description
+#' DecompositionConfig subclass for t-Distributed Stochastic Neighbor Embedding.
+#' `Y_init` (an optional initial embedding matrix) is a plain property: it is
+#' not JSON-expressible and is excluded from the generated schema.
+#'
+#' @author EDG
+#' @noRd
+tSNEConfig <- schema_class(
+  name = "tSNEConfig",
+  parent = DecompositionConfig,
+  defaults = list(
+    verbose = DefaultPolicy(
+      kind = "runtime",
+      requires = "verbose",
+      reason = "Read from the runtime verbosity option."
+    ),
+    stop_lying_iter = DefaultPolicy(
+      kind = "expression",
+      expression = list(
+        `if` = list(list(`===` = list(list(var = "Y_init"), NULL)), 250L, 0L)
+      )
+    ),
+    mom_switch_iter = DefaultPolicy(
+      kind = "expression",
+      expression = list(
+        `if` = list(list(`===` = list(list(var = "Y_init"), NULL)), 250L, 0L)
+      )
+    )
+  ),
+  properties = list(
+    algorithm = prop_algorithm("tSNE"),
+    k = prop_integer(
+      2L,
+      min = 1L,
+      description = "Number of components to extract."
+    ),
+    initial_dims = prop_integer(
+      50L,
+      min = 1L,
+      description = "Initial dimensions."
+    ),
+    perplexity = prop_float(30, min = 0, description = "Perplexity."),
+    theta = prop_float(
+      0.5,
+      min = 0,
+      max = 1,
+      description = "Speed/accuracy trade-off."
+    ),
+    check_duplicates = prop_boolean(
+      TRUE,
+      description = "Check for duplicates."
+    ),
+    pca = prop_boolean(TRUE, description = "Perform an initial PCA step."),
+    partial_pca = prop_boolean(
+      FALSE,
+      description = "Use truncated PCA (irlba)."
+    ),
+    max_iter = prop_integer(
+      1000L,
+      min = 1L,
+      description = "Maximum number of iterations."
+    ),
+    verbose = prop_boolean(FALSE, description = "Print progress."),
+    is_distance = prop_boolean(
+      FALSE,
+      description = "Treat the input as a distance matrix."
+    ),
+    Y_init = prop_matrix(
+      nullable = TRUE,
+      data_bound = "n_cases",
+      data_dependent = TRUE,
+      description = "Initial Y (embedding) matrix. Unset initializes it at random."
+    ),
+    pca_center = prop_boolean(
+      TRUE,
+      description = "Center before the PCA step."
+    ),
+    pca_scale = prop_boolean(FALSE, description = "Scale before the PCA step."),
+    normalize = prop_boolean(TRUE, description = "Normalize the input."),
+    stop_lying_iter = prop_integer(
+      250L,
+      min = 0L,
+      description = "Iteration after which exaggeration stops."
+    ),
+    mom_switch_iter = prop_integer(
+      250L,
+      min = 0L,
+      description = "Iteration at which momentum switches."
+    ),
+    momentum = prop_float(0.5, description = "Initial momentum."),
+    final_momentum = prop_float(
+      0.8,
+      description = "Momentum used later in optimization."
+    ),
+    eta = prop_float(200, description = "Learning rate."),
+    exaggeration_factor = prop_float(
+      12,
+      description = "Early-exaggeration factor."
+    )
+  ),
+  publication = SchemaPublication(
+    role = "leaf",
+    description = "t-Distributed Stochastic Neighbor Embedding.",
+    order = 5L
+  )
+) # /rtemis::tSNEConfig
+
+
+# %% setup_tSNE ----
+#' Setup tSNE config.
+#'
+#' @details
+#' Get more information on the config by running `?Rtsne::Rtsne`.
+#'
+#' @param k Integer [1, Inf): Number of components.
+#' @param initial_dims Integer [1, Inf): Initial dimensions.
+#' @param perplexity Numeric [0, Inf): Perplexity.
+#' @param theta Numeric \[0, 1\]: Speed/accuracy trade-off.
+#' @param check_duplicates Logical: If TRUE, check for duplicates.
+#' @param pca Logical: If TRUE, perform PCA.
+#' @param partial_pca Logical: If TRUE, perform partial PCA.
+#' @param max_iter Integer [1, Inf): Maximum number of iterations.
+#' @param verbose Logical: If TRUE, print messages.
+#' @param is_distance Logical: If TRUE, `x` is a distance matrix.
+#' @param Y_init Optional Matrix: Initial Y matrix.
+#' @param pca_center Logical: If TRUE, center PCA.
+#' @param pca_scale Logical: If TRUE, scale PCA.
+#' @param normalize Logical: If TRUE, normalize.
+#' @param stop_lying_iter Integer [0, Inf): Stop lying iterations.
+#' @param mom_switch_iter Integer [0, Inf): Momentum switch iterations.
+#' @param momentum Numeric: Momentum.
+#' @param final_momentum Numeric: Final momentum.
+#' @param eta Numeric: Eta.
+#' @param exaggeration_factor Numeric: Exaggeration factor.
+#' @param num_threads Optional Integer: Deprecated and ignored. Threads come
+#' from the execution config: set `n_workers_algorithm` in the
+#' `execution_config` passed to [decomp].
+#' @param features Optional Character vector: Names of at least 2 distinct
+#'   feature columns to decompose. `NULL` decomposes all numeric features.
+#'
+#' @return tSNEConfig object.
+#'
+#' @author EDG
+#' @export
+#' @examples
+#' tSNE_config <- setup_tSNE(k = 3L)
+#' tSNE_config
+setup_tSNE <- function(
+  k = 2L,
+  initial_dims = 50L,
+  perplexity = 30,
+  theta = 0.5,
+  check_duplicates = TRUE,
+  pca = TRUE,
+  partial_pca = FALSE,
+  max_iter = 1000L,
+  verbose = getOption("verbose", FALSE),
+  is_distance = FALSE,
+  Y_init = NULL,
+  pca_center = TRUE,
+  pca_scale = FALSE,
+  normalize = TRUE,
+  stop_lying_iter = if (is.null(Y_init)) 250L else 0L,
+  mom_switch_iter = if (is.null(Y_init)) 250L else 0L,
+  momentum = 0.5,
+  final_momentum = 0.8,
+  eta = 200,
+  exaggeration_factor = 12,
+  num_threads = NULL,
+  features = NULL
+) {
+  apply_setup_defaults(tSNEConfig)
+  k <- clean_posint(k)
+  initial_dims <- clean_posint(initial_dims)
+  max_iter <- clean_posint(max_iter)
+  stop_lying_iter <- clean_int(stop_lying_iter)
+  mom_switch_iter <- clean_int(mom_switch_iter)
+  if (!is.null(num_threads)) {
+    .Deprecated(
+      msg = paste0(
+        "`setup_tSNE(num_threads =)` is deprecated and ignored: set ",
+        "`n_workers_algorithm` in the `execution_config` passed to `decomp()`."
+      )
+    )
+  }
+  tSNEConfig(
+    k = k,
+    initial_dims = initial_dims,
+    perplexity = perplexity,
+    theta = theta,
+    check_duplicates = check_duplicates,
+    pca = pca,
+    partial_pca = partial_pca,
+    max_iter = max_iter,
+    verbose = verbose,
+    is_distance = is_distance,
+    Y_init = Y_init,
+    pca_center = pca_center,
+    pca_scale = pca_scale,
+    normalize = normalize,
+    stop_lying_iter = stop_lying_iter,
+    mom_switch_iter = mom_switch_iter,
+    momentum = momentum,
+    final_momentum = final_momentum,
+    eta = eta,
+    exaggeration_factor = exaggeration_factor,
+    features = features
+  )
+} # /rtemis::setup_tSNE
+
+
+# %% IsomapConfig ----
+#' @title IsomapConfig
+#'
+#' @description
+#' DecompositionConfig subclass for Isomap.
+#'
+#' @author EDG
+#' @noRd
+IsomapConfig <- schema_class(
+  name = "IsomapConfig",
+  parent = DecompositionConfig,
+  properties = list(
+    algorithm = prop_algorithm("Isomap"),
+    k = prop_integer(
+      2L,
+      min = 1L,
+      description = "Number of components to extract."
+    ),
+    dist_method = prop_string(
+      "euclidean",
+      enum = c("euclidean", "manhattan"),
+      description = "Distance method."
+    ),
+    nsd = prop_integer(
+      0L,
+      min = 0L,
+      description = "Number of shortest dissimilarities retained (0 = all)."
+    ),
+    path = prop_string(
+      "shortest",
+      enum = c("shortest", "extended"),
+      description = "How geodesic distances are traced through the neighborhood graph."
+    )
+  ),
+  publication = SchemaPublication(
+    role = "leaf",
+    description = "Isomap.",
+    order = 6L
+  )
+) # /rtemis::IsomapConfig
+
+
+# %% setup_Isomap ----
+#' Setup Isomap config.
+#'
+#' @param k Integer [1, Inf): Number of components.
+#' @param dist_method Character \{"euclidean", "manhattan"\}: Distance method.
+#' @param nsd Integer [0, Inf): Number of shortest dissimilarities retained.
+#' @param path Character \{"shortest", "extended"\}: Path argument for `vegan::isomap`.
+#' @param features Optional Character vector: Names of at least 2 distinct
+#'   feature columns to decompose. `NULL` decomposes all numeric features.
+#'
+#' @return IsomapConfig object.
+#'
+#' @author EDG
+#' @export
+#' @examples
+#' isomap_config <- setup_Isomap(k = 3L)
+#' isomap_config
+setup_Isomap <- function(
+  k = 2L,
+  dist_method = "euclidean",
+  nsd = 0L,
+  path = "shortest",
+  features = NULL
+) {
+  apply_setup_defaults(IsomapConfig)
+  k <- clean_posint(k)
+  nsd <- clean_int(nsd)
+  IsomapConfig(
+    k = k,
+    dist_method = dist_method,
+    nsd = nsd,
+    path = path,
+    features = features
+  )
+} # /rtemis::setup_Isomap
+
+
+# %% AutoencoderBaseConfig ----
+#' @title AutoencoderBaseConfig
+#'
+#' @description
+#' Abstract, unpublished parent of the torch autoencoder configs. It holds the
+#' properties every autoencoder declares identically and the dispatched methods
+#' in `decomp_Autoencoder.R`; each leaf publishes the full property set flat,
+#' so no schema, form or generated model shows this class.
+#'
+#' The optimizer, schedule, layer and dropout settings come from the
+#' `torch_*_props()` factories `MLPHyperparameters` also splices, so the two
+#' families declare them once. Nothing here is tunable.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+AutoencoderBaseConfig <- schema_class(
+  name = "AutoencoderBaseConfig",
+  parent = DecompositionConfig,
+  package = "rtemis",
+  abstract = TRUE,
+  properties = c(
+    list(
+      k = prop_integer(
+        2L,
+        min = 1L,
+        description = "Number of components to extract: the width of the latent layer."
+      ),
+      hidden_units = prop_integer(
+        NULL,
+        min = 1L,
+        nullable = TRUE,
+        vector = TRUE,
+        min_items = 1L,
+        description = "Units in each hidden layer of the encoder, input side first; the decoder mirrors them. Unset uses one hidden layer whose width is the geometric mean of the number of features and k, at least 32 and at most 512, and never below k."
+      )
+    ),
+    torch_layer_props(tunable = FALSE),
+    torch_regularization_props(
+      tunable = FALSE,
+      input_dropout_description = "Dropout probability applied to the standardized input during training, a masking corruption that makes the model denoising. The reconstruction target stays uncorrupted."
+    ),
+    list(
+      input_noise = prop_float(
+        0,
+        min = 0,
+        description = "Standard deviation of the Gaussian noise added to the standardized input during training, which makes the model denoising. The reconstruction target stays uncorrupted. 0 adds none."
+      ),
+      loss = prop_string(
+        "mse",
+        enum = TORCH_REGRESSION_LOSSES,
+        description = "Reconstruction loss."
+      )
+    ),
+    torch_optimization_props(
+      tunable = FALSE,
+      patience_description = "Epochs without improvement of the held-out reconstruction loss before stopping early. Applies when validation_fraction is greater than 0.",
+      # A fixed batch size gives small data too few optimization steps: with
+      # 256 cases per batch, 150 cases train for one step per epoch.
+      batch_size = prop_integer(
+        NULL,
+        min = 1L,
+        nullable = TRUE,
+        description = "Cases per optimization step. Unset uses a tenth of the training cases, at least 16 and at most 256."
+      )
+    ),
+    list(
+      validation_fraction = prop_float(
+        0.1,
+        min = 0,
+        exclusive_max = 1,
+        description = "Fraction of the cases held out to decide early stopping and to select the weights of the best epoch. 0 holds out none and trains for max_epochs."
+      )
+    )
+  ),
+  validator = function(self) {
+    check_applies_when(self)
+  }
+) # /rtemis::AutoencoderBaseConfig
+
+
+# %% AutoencoderConfig ----
+#' @title AutoencoderConfig
+#'
+#' @description
+#' DecompositionConfig subclass for an autoencoder trained with `torch`.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+AutoencoderConfig <- schema_class(
+  name = "AutoencoderConfig",
+  parent = AutoencoderBaseConfig,
+  properties = list(
+    algorithm = prop_algorithm("Autoencoder")
+  ),
+  publication = SchemaPublication(
+    role = "leaf",
+    description = "Autoencoder (torch).",
+    order = 7L
+  )
+) # /rtemis::AutoencoderConfig
+
+
+# %% setup_Autoencoder ----
+#' Setup Autoencoder config.
+#'
+#' A fully connected autoencoder built and trained with `torch`: an encoder maps
+#' the features to `k` components through the hidden layers, and a decoder
+#' mirroring it maps the components back.
+#'
+#' @details
+#' **Architecture.** `hidden_units` gives the encoder's hidden widths from the
+#' input side, e.g. `c(64L, 16L)`; the decoder uses them in reverse, and both
+#' the latent layer and the output layer are linear. NULL uses one hidden
+#' layer of width `round(sqrt(p * k))` for `p` features, the geometric mean of
+#' the input and latent widths, held between 32 and 512 and never below `k`.
+#' `batch_size = NULL` uses a tenth of the training cases, held between 16 and
+#' 256, so small data still gets several optimization steps per epoch. The fit
+#' reports and records both values it used.
+#'
+#' **Inputs** are always centered and scaled with the training cases'
+#' statistics (a constant feature is only centered). [reconstruct] undoes this,
+#' so reconstructions and the reconstruction metrics are in the units of the
+#' data, comparable with any other decomposition's.
+#'
+#' **Denoising.** `input_noise` adds Gaussian noise of that standard deviation to
+#' the standardized inputs, and `input_dropout` zeroes each input with that
+#' probability, during training only. The model learns to reconstruct the
+#' uncorrupted input, which regularizes the components; [apply_decomp] and
+#' [reconstruct] never corrupt.
+#'
+#' **Early stopping.** `validation_fraction` of the cases, drawn at random, are
+#' held out; training stops after `patience` epochs without improvement of
+#' their reconstruction loss and keeps the weights of the best epoch. The
+#' components are then computed for every case, held-out ones included.
+#' `validation_fraction = 0` trains for `max_epochs`.
+#'
+#' **Reproducibility, threads and device** come from the execution config
+#' passed to [decomp]: its `seed` seeds torch as well as R, its algorithm
+#' threads are libtorch's thread count, and its `device` is the compute device.
+#' Unset, the device is `cuda` where available and `cpu` otherwise. `"mps"`,
+#' the Apple silicon GPU, runs only when named. In rtemis benchmarks on an Apple
+#' M5 the CPU fitted faster than `"mps"` in every configuration measured, up to
+#' 50,000 cases, 5,000 features, 1,024 hidden units and batches of 2,048, by
+#' 1.1 to 3.7 times; `"mps"` also slows down across many fits in one R
+#' session. A seed does not reach dropout on `"mps"`, so a seeded fit there
+#' reproduces only while `dropout` and `input_dropout` are 0, and warns
+#' otherwise.
+#'
+#' The optimizer, schedule and early-stopping settings mean what they do in
+#' [setup_MLP].
+#'
+#' @param k Integer [1, Inf): Number of components, the width of the latent
+#' layer.
+#' @param hidden_units Optional Integer [1, Inf) vector: Units in each hidden
+#' layer of the encoder, input side first.
+#' @param activation Character \{"relu", "gelu", "silu", "elu", "selu", "leaky_relu", "tanh"\}: Activation applied after every hidden layer.
+#' @param norm Optional Character \{"batch_norm", "layer_norm"\}: Normalization applied in every hidden layer. NULL applies none.
+#' @param dropout Numeric [0, 1): Dropout probability applied after every hidden layer.
+#' @param input_dropout Numeric [0, 1): Probability of zeroing each standardized input during training.
+#' @param weight_decay Numeric [0, Inf): L2 penalty, decoupled from the gradient under the adamw optimizer.
+#' @param input_noise Numeric [0, Inf): Standard deviation of the Gaussian noise added to the standardized inputs during training.
+#' @param loss Character \{"mse", "l1", "smooth_l1"\}: Reconstruction loss.
+#' @param optimizer Character \{"adamw", "adam", "sgd", "rmsprop"\}: Optimization algorithm.
+#' @param lr Numeric (0, Inf): Learning rate.
+#' @param beta1 Optional Numeric [0, 1): Exponential decay rate of the first moment estimate. Applies to the adam and adamw optimizers.
+#' @param beta2 Optional Numeric [0, 1): Exponential decay rate of the second moment estimate. Applies to the adam and adamw optimizers.
+#' @param eps Optional Numeric (0, Inf): Term added to the denominator for numerical stability. Applies to the adam, adamw and rmsprop optimizers.
+#' @param momentum Optional Numeric [0, Inf): Momentum factor. Applies to the sgd and rmsprop optimizers.
+#' @param lr_scheduler Optional Character \{"step", "cosine_annealing", "one_cycle", "reduce_on_plateau"\}: Learning-rate schedule. NULL holds the learning rate fixed.
+#' @param batch_size Optional Integer [1, Inf): Cases per optimization step.
+#' @param max_epochs Integer [1, Inf): Largest number of passes over the training cases.
+#' @param patience Integer [1, Inf): Epochs without improvement of the held-out loss before stopping early.
+#' @param max_grad_norm Optional Numeric (0, Inf): Clip the gradient norm to this value before each step. NULL does not clip.
+#' @param validation_fraction Numeric [0, 1): Fraction of the cases held out for early stopping.
+#' @param features Optional Character vector: Names of at least 2 distinct
+#'   feature columns to decompose. `NULL` decomposes all numeric features.
+#'
+#' @return AutoencoderConfig object.
+#'
+#' @author EDG
+#' @export
+#' @examples
+#' ae_config <- setup_Autoencoder(k = 2L, hidden_units = 8L, input_noise = 0.1)
+#' ae_config
+setup_Autoencoder <- function(
+  k = 2L,
+  hidden_units = NULL,
+  activation = "relu",
+  norm = NULL,
+  dropout = 0,
+  input_dropout = 0,
+  weight_decay = 0,
+  input_noise = 0,
+  loss = "mse",
+  optimizer = "adamw",
+  lr = 1e-3,
+  beta1 = NULL,
+  beta2 = NULL,
+  eps = NULL,
+  momentum = NULL,
+  lr_scheduler = NULL,
+  batch_size = NULL,
+  max_epochs = 100L,
+  patience = 10L,
+  max_grad_norm = NULL,
+  validation_fraction = 0.1,
+  features = NULL
+) {
+  apply_setup_defaults(AutoencoderConfig)
+  k <- clean_posint(k)
+  hidden_units <- clean_posint(hidden_units)
+  batch_size <- clean_posint(batch_size)
+  max_epochs <- clean_posint(max_epochs)
+  patience <- clean_posint(patience)
+  AutoencoderConfig(
+    k = k,
+    hidden_units = hidden_units,
+    activation = activation,
+    norm = norm,
+    dropout = dropout,
+    input_dropout = input_dropout,
+    weight_decay = weight_decay,
+    input_noise = input_noise,
+    loss = loss,
+    optimizer = optimizer,
+    lr = lr,
+    beta1 = beta1,
+    beta2 = beta2,
+    eps = eps,
+    momentum = momentum,
+    lr_scheduler = lr_scheduler,
+    batch_size = batch_size,
+    max_epochs = max_epochs,
+    patience = patience,
+    max_grad_norm = max_grad_norm,
+    validation_fraction = validation_fraction,
+    features = features
+  )
+} # /rtemis::setup_Autoencoder
+
+
+# %% VariationalAutoencoderConfig ----
+#' @title VariationalAutoencoderConfig
+#'
+#' @description
+#' DecompositionConfig subclass for a variational autoencoder trained with
+#' `torch`. It adds `beta`, the weight of the KL divergence, to the settings
+#' every autoencoder shares.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+VariationalAutoencoderConfig <- schema_class(
+  name = "VariationalAutoencoderConfig",
+  parent = AutoencoderBaseConfig,
+  properties = list(
+    algorithm = prop_algorithm("VariationalAutoencoder"),
+    beta = prop_float(
+      1,
+      min = 0,
+      description = "Weight of the KL divergence between each case's latent distribution and the standard normal prior, against the reconstruction loss summed over features. 1 is the standard variational autoencoder; larger values give a beta-VAE, whose components are closer to independent and reconstruct less."
+    )
+  ),
+  publication = SchemaPublication(
+    role = "leaf",
+    description = "Variational autoencoder (torch).",
+    order = 8L
+  )
+) # /rtemis::VariationalAutoencoderConfig
+
+
+# %% setup_VariationalAutoencoder ----
+#' Setup Variational Autoencoder config.
+#'
+#' A fully connected variational autoencoder built and trained with `torch`:
+#' the encoder maps each case to a normal distribution over `k` latent
+#' dimensions, and the decoder maps a draw from it back to the features.
+#'
+#' @details
+#' **Objective.** For each case, the reconstruction loss summed over features
+#' plus `beta` times the KL divergence of the case's latent distribution from
+#' the standard normal, summed over the `k` dimensions; the mean over cases is
+#' minimized. `beta = 1` is the standard variational autoencoder (with
+#' `loss = "mse"`, up to constants, the negative evidence lower bound of a
+#' unit-variance Gaussian decoder); `beta > 1` is a beta-VAE, trading
+#' reconstruction for components closer to independent; `beta = 0` drops the
+#' prior and leaves a noisy autoencoder.
+#'
+#' **Components** are the means of the latent distributions, so [decomp],
+#' [apply_decomp] and [reconstruct] are deterministic: sampling happens only in
+#' training. [reconstruct] decodes the means.
+#'
+#' Architecture, input standardization, denoising, early stopping, and the
+#' execution config's seed, threads and device work as in [setup_Autoencoder].
+#' The loss reported during training and for early stopping is the full
+#' objective, so it is not on the scale of [setup_Autoencoder]'s, which
+#' averages the reconstruction loss over features.
+#'
+#' @inheritParams setup_Autoencoder
+#' @param beta Numeric [0, Inf): Weight of the KL divergence from the prior.
+#'
+#' @return VariationalAutoencoderConfig object.
+#'
+#' @author EDG
+#' @export
+#' @examples
+#' vae_config <- setup_VariationalAutoencoder(k = 2L, beta = 4)
+#' vae_config
+setup_VariationalAutoencoder <- function(
+  k = 2L,
+  hidden_units = NULL,
+  activation = "relu",
+  norm = NULL,
+  dropout = 0,
+  input_dropout = 0,
+  weight_decay = 0,
+  input_noise = 0,
+  loss = "mse",
+  optimizer = "adamw",
+  lr = 1e-3,
+  beta1 = NULL,
+  beta2 = NULL,
+  eps = NULL,
+  momentum = NULL,
+  lr_scheduler = NULL,
+  batch_size = NULL,
+  max_epochs = 100L,
+  patience = 10L,
+  max_grad_norm = NULL,
+  validation_fraction = 0.1,
+  beta = 1,
+  features = NULL
+) {
+  apply_setup_defaults(VariationalAutoencoderConfig)
+  k <- clean_posint(k)
+  hidden_units <- clean_posint(hidden_units)
+  batch_size <- clean_posint(batch_size)
+  max_epochs <- clean_posint(max_epochs)
+  patience <- clean_posint(patience)
+  VariationalAutoencoderConfig(
+    k = k,
+    hidden_units = hidden_units,
+    activation = activation,
+    norm = norm,
+    dropout = dropout,
+    input_dropout = input_dropout,
+    weight_decay = weight_decay,
+    input_noise = input_noise,
+    loss = loss,
+    optimizer = optimizer,
+    lr = lr,
+    beta1 = beta1,
+    beta2 = beta2,
+    eps = eps,
+    momentum = momentum,
+    lr_scheduler = lr_scheduler,
+    batch_size = batch_size,
+    max_epochs = max_epochs,
+    patience = patience,
+    max_grad_norm = max_grad_norm,
+    validation_fraction = validation_fraction,
+    beta = beta,
+    features = features
+  )
+} # /rtemis::setup_VariationalAutoencoder
+
+
+# %% vegdist_methods ----
+# The distances MDS and PCoA compute with `vegan::vegdist()`. Each is a
+# function of two cases alone, so the distance from a new case to a training
+# case does not depend on the other cases it arrives with -- the property PCoA's
+# out-of-sample projection needs. vegdist's "gower", "mahalanobis" and "chisq"
+# use dataset-level ranges, covariance or totals and are left out of both
+# leaves, so that one vocabulary serves both; the count-based indices ("raup",
+# "morisita", "chao", "cao") assume integer abundances.
+vegdist_methods <- c(
+  "euclidean",
+  "manhattan",
+  "chord",
+  "bray",
+  "canberra",
+  "jaccard",
+  "kulczynski",
+  "hellinger"
+)
+
+# The subset that is defined only for non-negative data. vegdist warns rather
+# than errors on negative entries, so `check_vegdist_input()` enforces this.
+vegdist_methods_nonneg <- c(
+  "bray",
+  "canberra",
+  "jaccard",
+  "kulczynski",
+  "hellinger"
+)
+
+
+# The subset that is undefined for a case whose values are all zero, because it
+# normalizes each case by its sum or norm.
+vegdist_methods_nonzero <- c("chord", "kulczynski", "hellinger")
+
+
+# %% dist_method_prop ----
+# One declaration of `dist_method` for both distance-based leaves.
+dist_method_prop <- function() {
+  prop_string(
+    "euclidean",
+    enum = vegdist_methods,
+    description = paste(
+      "Dissimilarity between cases. \"euclidean\", \"manhattan\" and \"chord\"",
+      "accept any real values; \"bray\", \"canberra\", \"jaccard\",",
+      "\"kulczynski\" and \"hellinger\" require non-negative values.",
+      "\"chord\", \"kulczynski\" and \"hellinger\" are undefined for a case",
+      "whose values are all zero."
+    )
+  )
+} # /rtemis::dist_method_prop
+
+
+# %% MDSConfig ----
+#' @title MDSConfig
+#'
+#' @description
+#' DecompositionConfig subclass for stress-minimizing multidimensional scaling.
+#'
+#' @author EDG
+#' @noRd
+# monoMDS settings not exposed: the "hybrid" model, whose `threshold` would
+# apply under that one `model` value only; `weakties`, which applies to the
+# nonmetric models only (vegan's default, weak ties, is kept); the stress
+# formula (Kruskal's stress-1 is kept); `scaling` and `pc`, kept on so the
+# configuration is centered, scaled and rotated to its principal axes; and the
+# convergence tolerances.
+MDSConfig <- schema_class(
+  name = "MDSConfig",
+  parent = DecompositionConfig,
+  properties = list(
+    algorithm = prop_algorithm("MDS"),
+    k = prop_integer(
+      2L,
+      min = 1L,
+      description = "Number of components to extract."
+    ),
+    dist_method = dist_method_prop(),
+    model = prop_string(
+      "global",
+      enum = c("global", "local", "linear"),
+      description = paste(
+        "Relation fitted between dissimilarities and configuration distances.",
+        "\"global\" is nonmetric scaling: a single monotone regression over",
+        "all dissimilarities. \"local\" fits a separate monotone regression",
+        "for each case's dissimilarities. \"linear\" is metric scaling: a",
+        "linear regression."
+      )
+    ),
+    nstart = prop_integer(
+      20L,
+      min = 1L,
+      description = paste(
+        "Number of starting configurations; the fit with the lowest stress is",
+        "kept. The first start is the classical scaling configuration and the",
+        "rest are random."
+      )
+    ),
+    max_iter = prop_integer(
+      200L,
+      min = 1L,
+      description = "Maximum number of iterations per start."
+    )
+  ),
+  publication = SchemaPublication(
+    role = "leaf",
+    description = "Multidimensional Scaling.",
+    order = 9L
+  )
+) # /rtemis::MDSConfig
+
+
+# %% setup_MDS ----
+#' Setup MDS config.
+#'
+#' Stress-minimizing multidimensional scaling with `vegan::monoMDS()`: finds `k`
+#' coordinates per case whose distances match the dissimilarities between cases
+#' as closely as possible, measured by Kruskal's stress-1. For classical
+#' (Torgerson) scaling, which solves an eigenproblem instead, see [setup_PCoA].
+#'
+#' @details
+#' Each start runs `vegan::monoMDS()` from its own initial configuration, and
+#' the one with the lowest stress is kept. The first start is the classical
+#' scaling solution, `stats::cmdscale()`; if that has fewer than `k` dimensions
+#' with positive eigenvalues, the missing ones are random. Every other start is
+#' uniform on \[-1, 1\]. The random values come from R's random number
+#' generator, so the execution config's seed reproduces the fit. The final configuration is centered, scaled and rotated to its principal
+#' axes, so its components are uncorrelated, but the first `j` components of a
+#' `k`-dimensional solution are not the `j`-dimensional solution.
+#'
+#' MDS cannot be applied to new data, so it cannot be used as the
+#' decomposition step in [train], and [reconstruct] does not apply.
+#'
+#' @param k Integer \[1, Inf): Number of components. (passed to `monoMDS` `k`)
+#' @param dist_method Character \{"euclidean", "manhattan", "chord", "bray",
+#' "canberra", "jaccard", "kulczynski", "hellinger"\}: Dissimilarity between
+#' cases, computed with `vegan::vegdist()`. "bray", "canberra", "jaccard",
+#' "kulczynski" and "hellinger" require non-negative data.
+#' @param model Character \{"global", "local", "linear"\}: "global" is nonmetric
+#' MDS (one monotone regression); "local" fits one monotone regression per case;
+#' "linear" is metric MDS. (passed to `monoMDS` `model`)
+#' @param nstart Integer \[1, Inf): Number of starting configurations. 1 starts
+#' from the classical scaling solution only.
+#' @param max_iter Integer \[1, Inf): Maximum number of iterations per start.
+#' (passed to `monoMDS` `maxit`)
+#' @param features Optional Character vector: Names of at least 2 distinct
+#'   feature columns to decompose. `NULL` decomposes all numeric features.
+#'
+#' @return MDSConfig object.
+#'
+#' @author EDG
+#' @export
+#' @examples
+#' mds_config <- setup_MDS(k = 2L, dist_method = "manhattan")
+#' mds_config
+setup_MDS <- function(
+  k = 2L,
+  dist_method = "euclidean",
+  model = "global",
+  nstart = 20L,
+  max_iter = 200L,
+  features = NULL
+) {
+  apply_setup_defaults(MDSConfig)
+  k <- clean_posint(k)
+  nstart <- clean_posint(nstart)
+  max_iter <- clean_posint(max_iter)
+  MDSConfig(
+    k = k,
+    dist_method = dist_method,
+    model = model,
+    nstart = nstart,
+    max_iter = max_iter,
+    features = features
+  )
+} # /rtemis::setup_MDS
+
+
+# %% PCoAConfig ----
+#' @title PCoAConfig
+#'
+#' @description
+#' DecompositionConfig subclass for Principal Coordinates Analysis.
+#'
+#' @author EDG
+#' @noRd
+PCoAConfig <- schema_class(
+  name = "PCoAConfig",
+  parent = DecompositionConfig,
+  properties = list(
+    algorithm = prop_algorithm("PCoA"),
+    k = prop_integer(
+      2L,
+      min = 1L,
+      description = paste(
+        "Number of components to extract. Must not exceed the number of",
+        "positive eigenvalues of the doubly centered squared dissimilarities."
+      )
+    ),
+    dist_method = dist_method_prop()
+  ),
+  publication = SchemaPublication(
+    role = "leaf",
+    description = "Principal Coordinates Analysis.",
+    order = 10L
+  )
+) # /rtemis::PCoAConfig
+
+
+# %% setup_PCoA ----
+#' Setup PCoA config.
+#'
+#' Principal coordinates analysis, also called classical or Torgerson
+#' multidimensional scaling: an eigendecomposition of the doubly centered
+#' squared dissimilarities between cases, with `stats::cmdscale()`. With
+#' `dist_method = "euclidean"` the components equal PCA scores of the centered,
+#' unscaled data, up to sign; other dissimilarities are what PCoA is for.
+#'
+#' @details
+#' PCoA applies to new data with Gower's (1968) out-of-sample formula, from the
+#' dissimilarities between each new case and the training cases, so it can be
+#' used as the decomposition step in [train]. Applying a fit to its own training
+#' data reproduces the fitted components. Because those dissimilarities are
+#' needed, the fit keeps the training feature matrix, and its size grows with
+#' the number of training cases.
+#'
+#' Dissimilarities other than "euclidean", "chord" and "hellinger" generally
+#' give some negative eigenvalues; only dimensions with positive eigenvalues are
+#' returned, and asking for more is an error that states how many there are.
+#' [reconstruct] does not apply.
+#'
+#' @param k Integer \[1, Inf): Number of components. (passed to `cmdscale` `k`)
+#' @param dist_method Character \{"euclidean", "manhattan", "chord", "bray",
+#' "canberra", "jaccard", "kulczynski", "hellinger"\}: Dissimilarity between
+#' cases, computed with `vegan::vegdist()`. "bray", "canberra", "jaccard",
+#' "kulczynski" and "hellinger" require non-negative data.
+#' @param features Optional Character vector: Names of at least 2 distinct
+#'   feature columns to decompose. `NULL` decomposes all numeric features.
+#'
+#' @return PCoAConfig object.
+#'
+#' @author EDG
+#' @export
+#' @examples
+#' pcoa_config <- setup_PCoA(k = 2L, dist_method = "bray")
+#' pcoa_config
+setup_PCoA <- function(
+  k = 2L,
+  dist_method = "euclidean",
+  features = NULL
+) {
+  apply_setup_defaults(PCoAConfig)
+  k <- clean_posint(k)
+  PCoAConfig(
+    k = k,
+    dist_method = dist_method,
+    features = features
+  )
+} # /rtemis::setup_PCoA
+
+
+# %% decom_can_apply ----
+#' Check whether a decomposition algorithm can be applied on new data
+#'
+#' @param algorithm Character: Decomposition algorithm name.
+#'
+#' @return Logical.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+decom_can_apply <- function(algorithm) {
+  .get_decom_name(algorithm) %in% decom_algorithms_applicable
+} # /rtemis::decom_can_apply

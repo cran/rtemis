@@ -1,0 +1,991 @@
+# 020_Props_read.R
+# ::rtemis::
+# 2026- EDG rtemis.org
+
+# The read direction: JSON Schema -> PropertySpec -> S7 class, inverting
+# `spec_to_schema()` / `S7_to_JSONSchema()` in `010_Props.R`.
+#
+# What makes this possible is `x-rtemis`, which carries the axes standard JSON
+# Schema cannot express. Two of them are load-bearing here:
+#
+#   - `tunable` says whether a hyperparameter may be tuned *at all*, which no
+#     document shape can state: a document says what one config does, not what
+#     the algorithm permits. Shapes are told apart by the standard keywords: a
+#     search space is tagged `{"candidates": [...]}` and a broadcast value is
+#     an array.
+#   - `type` names the leaf type. JSON has one number type, so an integer
+#     property and a float property are otherwise indistinguishable once a
+#     default has been through a JSON encoder.
+#
+# A schema alone is not sufficient to rebuild a class: `default` is not a
+# schema keyword (`spec: rtemis/config-artifacts`), so defaults arrive
+# separately, from the artifact `data-raw/generate_defaults.R` publishes, and
+# `defaults` is an argument here. A port reads the two artifacts the same way.
+
+# %% schema_is_nullable ----
+#' Does a property schema admit null?
+#'
+#' Null appears two ways: as a member of a `type` array (the plain and container
+#' cases) or as a `{"type": "null"}` branch of a `oneOf` (the tunable and
+#' broadcast cases).
+#'
+#' @param x Named list: A JSON Schema property.
+#'
+#' @return Logical.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+schema_is_nullable <- function(x) {
+  if (isTRUE(x[["x-rtemis"]][["external"]])) {
+    return(schema_is_nullable(x[["anyOf"]][[1L]]))
+  }
+  branches <- x[["oneOf"]] %||% x[["anyOf"]]
+  if (!is.null(branches)) {
+    return(any(vapply(
+      branches,
+      function(b) identical(unname(b[["type"]]), "null"),
+      logical(1L)
+    )))
+  }
+  "null" %in% x[["type"]]
+} # /rtemis::schema_is_nullable
+
+
+# %% schema_element ----
+#' The sub-schema `spec_to_schema()` emitted as a container's element
+#'
+#' Mirrors that function's branches. For `container = "none"` the element is the
+#' scalar leaf itself. A matrix's rows are arrays, so its element is one step
+#' further in.
+#'
+#' @param x Named list: A JSON Schema property.
+#' @param container Character \{"none", "array", "map", "matrix", "table"\}: How
+#' values are wrapped.
+#' @param tunable Logical: Whether the property is tunable.
+#' @param broadcast Logical: Whether a bare scalar stands in for the container.
+#'
+#' @return Named list: The element sub-schema.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+schema_element <- function(x, container, tunable, broadcast) {
+  # `spec_to_schema()` builds its `oneOf` in a fixed order -- an optional null
+  # first, then the bare/scalar form, then the container form -- so branches are
+  # identified by position. Matching on `type` instead would be ambiguous
+  # whenever the element is itself an array (a list of per-tree vectors emits
+  # two "array" branches).
+  branches <- function() {
+    Filter(
+      function(b) !identical(unname(b[["type"]]), "null"),
+      x[["oneOf"]]
+    )
+  }
+  if (container == "array") {
+    if (tunable) {
+      # `oneOf: [value-array, search-array-of-array]`. The value array leads,
+      # where a broadcast property's array trails, so the two cannot be told
+      # apart by position -- only by which annotation is set.
+      return(branches()[[1L]][["items"]])
+    }
+    if (!broadcast) {
+      return(x[["items"]])
+    }
+    b <- branches()
+    return(b[[length(b)]][["items"]])
+  }
+  if (container == "factor") {
+    # A factor emits `{levels, codes}`; the leaf is the level label.
+    return(x[["properties"]][["levels"]][["items"]])
+  }
+  if (container == "matrix") {
+    return(x[["items"]][["items"]])
+  }
+  if (container == "map") {
+    return(x[["additionalProperties"]])
+  }
+  if (tunable) {
+    # The trailing branch is the search-values array; the leading one is the
+    # scalar leaf.
+    return(branches()[[1L]])
+  }
+  x
+} # /rtemis::schema_element
+
+
+# %% schema_array ----
+#' The sub-schema holding an array container's own keywords
+#'
+#' `minItems` and `uniqueItems` describe the array, not its element, so they sit
+#' one level above what `schema_element()` returns. Both `oneOf` forms put the
+#' array in a different place: a broadcast property's is the trailing branch
+#' (the scalar branch carries neither), a tunable one's is the leading branch
+#' (the trailing branch is the search space, whose own `minItems` counts
+#' candidates rather than elements).
+#'
+#' @param x Named list: A JSON Schema property with `container = "array"`.
+#' @param broadcast Logical: Whether a bare scalar stands in for the container.
+#' @param tunable Logical: Whether the property is tunable.
+#'
+#' @return Named list: The array sub-schema.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+schema_array <- function(x, broadcast, tunable = FALSE) {
+  if (!broadcast && !tunable) {
+    return(x)
+  }
+  branches <- Filter(
+    function(b) !identical(unname(b[["type"]]), "null"),
+    x[["oneOf"]]
+  )
+  if (tunable) {
+    return(branches[[1L]])
+  }
+  branches[[length(branches)]]
+} # /rtemis::schema_array
+
+
+# %% coerce_to_type ----
+#' Coerce a JSON-decoded value to the R type a spec declares
+#'
+#' JSON has a single number type, so an integer default survives a round trip
+#' through JSON as a double. `x-rtemis.type` is what restores the distinction.
+#'
+#' @param value Value as decoded from JSON, or NULL.
+#' @param type Character \{"boolean", "integer", "number", "string",
+#' "object"\}: Declared leaf type.
+#'
+#' @return `value` coerced to `type`, or NULL.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+coerce_to_type <- function(value, type) {
+  if (is.null(value)) {
+    return(NULL)
+  }
+  switch(
+    type,
+    boolean = as.logical(value),
+    integer = as.integer(value),
+    number = as.numeric(value),
+    string = as.character(value),
+    object = as.list(value)
+  )
+} # /rtemis::coerce_to_type
+
+
+# %% strip_suffix ----
+#' Remove a trailing sentence from a description
+#'
+#' @param x Character: The description.
+#' @param suffix Character: The sentence to remove.
+#'
+#' @return Character: `x` without `suffix`, right-trimmed.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+strip_suffix <- function(x, suffix) {
+  if (!nzchar(suffix) || !endsWith(x, suffix)) {
+    return(x)
+  }
+  trimws(substr(x, 1L, nchar(x) - nchar(suffix)), which = "right")
+} # /rtemis::strip_suffix
+
+
+# %% members_spec ----
+#' Rebuild a `table` or `struct` PropertySpec from its declared object shape
+#'
+#' The inverse of `members_schema()`. A table's shape sits at `items`, a
+#' struct's is the property itself, so the two are passed separately: `obj` is
+#' where the members live, `x` is where nullability is declared.
+#'
+#' @param obj Named list: The JSON Schema object carrying `properties`.
+#' @param x Named list: The property schema itself.
+#' @param ann Named list: The property's `x-rtemis` annotations.
+#' @param container Character \{"table", "struct"\}: Which container to build.
+#' @param data_bound Character or NULL: The property's data bound.
+#' @param description Character: The property's description.
+#' @param declarations Optional List: Declaration descriptors keyed by schema pointer.
+#' @param path Character: Pointer to this node.
+#' @param default Optional ANY: Declared value.
+#' @param default_present Logical: Whether default metadata is present.
+#' @param default_policy Optional DefaultPolicy: Input policy.
+#' @param decode_reference Optional Function: Artifact graph reference decoder.
+#'
+#' @return `PropertySpec` object.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+members_spec <- function(
+  obj,
+  x,
+  ann,
+  container,
+  data_bound,
+  description,
+  declarations = NULL,
+  path = "",
+  default = NULL,
+  default_present = TRUE,
+  default_policy = NULL,
+  decode_reference = NULL
+) {
+  member_path <- paste0(
+    path,
+    if (container == "table") "/items" else "",
+    "/properties/"
+  )
+  members <- lapply(names(obj[["properties"]]), function(nm) {
+    schema_to_spec(
+      obj[["properties"]][[nm]],
+      declarations = declarations,
+      path = paste0(member_path, default_pointer(nm)),
+      decode_reference = decode_reference
+    )
+  })
+  names(members) <- names(obj[["properties"]])
+  PropertySpec(
+    type = "object",
+    default = default,
+    default_present = default_present,
+    default_policy = default_policy,
+    nullable = schema_is_nullable(x),
+    tunable = FALSE,
+    container = container,
+    items = NULL,
+    members = members,
+    additional_members = if (is.list(obj[["additionalProperties"]])) {
+      schema_to_spec(
+        obj[["additionalProperties"]],
+        declarations = declarations,
+        path = paste0(
+          path,
+          if (container == "table") "/items" else "",
+          "/additionalProperties"
+        ),
+        decode_reference = decode_reference
+      )
+    },
+    min_members = as.integer(obj[["minProperties"]] %||% 0L),
+    min_items = if (container == "table") {
+      as.integer(x[["minItems"]] %||% 0L)
+    } else {
+      1L
+    },
+    max_items = if (container == "table" && !is.null(x[["maxItems"]])) {
+      as.integer(x[["maxItems"]])
+    } else {
+      NULL
+    },
+    required_members = as.character(obj[["required"]] %||% names(members)),
+    broadcast = FALSE,
+    data_bound = data_bound,
+    data_dependent = isTRUE(ann[["data_dependent"]]),
+    group = ann[["group"]],
+    description = description
+  )
+} # /rtemis::members_spec
+
+
+# %% schema_to_spec ----
+#' Convert a JSON Schema property to a PropertySpec
+#'
+#' The inverse of `spec_to_schema()`. Bounds and enum are read from the leaf,
+#' nullability from the type union or `oneOf`, and everything standard JSON
+#' Schema cannot express from `x-rtemis`.
+#'
+#' @param x Named list: A JSON Schema property, as generated by
+#' `spec_to_schema()`.
+#' @param default Optional: The property's default, from the defaults artifact.
+#' A `const` property takes its value from the schema and ignores this.
+#' @param declarations Optional List: Declaration descriptors keyed by schema pointer.
+#' @param path Character: Pointer to this node.
+#' @param decode_reference Optional Function: Artifact graph reference decoder.
+#'
+#' @return `PropertySpec` object.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+schema_to_spec <- function(
+  x,
+  default = NULL,
+  declarations = NULL,
+  path = "",
+  decode_reference = NULL
+) {
+  if (isTRUE(x[["x-rtemis"]][["external"]])) {
+    args <- list(
+      x = x[["anyOf"]][[1L]],
+      declarations = declarations,
+      path = paste0(path, "/anyOf/0"),
+      decode_reference = decode_reference
+    )
+    if (!missing(default)) {
+      args["default"] <- list(default)
+    }
+    spec <- do.call(schema_to_spec, args)
+    spec@external <- TRUE
+    return(spec)
+  }
+  default_present <- !missing(default)
+  default_policy <- NULL
+  if (!is.null(declarations)) {
+    if (!path %in% names(declarations)) {
+      rtemis.core::abort(
+        "Missing default declaration at ",
+        path,
+        ".",
+        class = "rtemis_schema_error"
+      )
+    }
+    declaration <- restore_default_numbers(declarations[[path]])
+    if (!declaration[["kind"]] %in% c("literal", "none")) {
+      rtemis.core::abort(
+        "Unknown default declaration at ",
+        path,
+        ".",
+        class = "rtemis_schema_error"
+      )
+    }
+    if (
+      length(setdiff(names(declaration), c("kind", "value", "policy"))) ||
+        (identical(declaration[["kind"]], "none") &&
+          "value" %in% names(declaration))
+    ) {
+      rtemis.core::abort(
+        "Contradictory default declaration at ",
+        path,
+        ".",
+        class = "rtemis_schema_error"
+      )
+    }
+    default_present <- identical(declaration[["kind"]], "literal")
+    if (default_present && !"value" %in% names(declaration)) {
+      rtemis.core::abort(
+        "Literal default lacks value at ",
+        path,
+        ".",
+        class = "rtemis_schema_error"
+      )
+    }
+    default <- default_from_wire(declaration[["value"]], x, decode_reference)
+    if (!is.null(declaration[["policy"]])) {
+      default_policy <- default_policy_from_wire(
+        declaration[["policy"]],
+        x,
+        decode_reference
+      )
+    }
+  }
+  ann <- x[["x-rtemis"]]
+  if (is.null(ann) || is.null(ann[["type"]])) {
+    rtemis.core::abort(
+      "Property schema carries no `x-rtemis.type`, so it was not generated from a PropertySpec and cannot be read back.",
+      class = c("rtemis_value_error", "rtemis_input_error")
+    )
+  }
+  type <- ann[["type"]]
+  container <- ann[["container"]] %||% "none"
+  broadcast <- isTRUE(ann[["broadcast"]])
+  tunable <- isTRUE(ann[["tunable"]])
+  constant <- identical(ann[["role"]], "constant")
+  data_bound <- ann[["data_bound"]]
+  # JSON has no vectors of length 1: `auto_unbox` writes a single allowed value
+  # as a scalar and a set as an array, and a reader with `simplifyVector =
+  # FALSE` hands both back as lists. Flatten to the atomic vector the spec
+  # declares.
+  applies_when <- ann[["applies_when"]]
+  if (!is.null(applies_when)) {
+    applies_when <- lapply(applies_when, unlist, use.names = FALSE)
+  }
+
+  description <- x[["description"]] %||% ""
+  if (!is.null(data_bound)) {
+    description <- strip_suffix(
+      description,
+      data_bound_note(data_bound, container, broadcast)
+    )
+  }
+  if (!is.null(applies_when)) {
+    description <- strip_suffix(description, applies_when_note(applies_when))
+  }
+
+  if (type == "union") {
+    branches <- x[["anyOf"]]
+    keep <- which(
+      !vapply(branches, function(b) identical(b[["type"]], "null"), logical(1L))
+    )
+    return(PropertySpec(
+      type = "union",
+      alternatives = lapply(keep, function(i) {
+        schema_to_spec(
+          branches[[i]],
+          declarations = declarations,
+          path = paste0(path, "/anyOf/", i - 1L),
+          decode_reference = decode_reference
+        )
+      }),
+      default = default,
+      default_present = default_present,
+      default_policy = default_policy,
+      nullable = schema_is_nullable(x),
+      tunable = FALSE,
+      container = "none",
+      broadcast = FALSE,
+      group = ann[["group"]],
+      description = description
+    ))
+  }
+  if (!is.null(ann[["target_class"]])) {
+    return(PropertySpec(
+      type = type,
+      target_class = ann[["target_class"]],
+      schema_choices = ann[["schema_choices"]],
+      alternate_class = ann[["alternate_class"]],
+      presence_key = ann[["presence_key"]],
+      same_variant = isTRUE(ann[["same_variant"]]),
+      key_pattern = x[["propertyNames"]][["pattern"]],
+      key_not_pattern = x[["propertyNames"]][["not"]][["pattern"]],
+      default = default,
+      default_present = default_present,
+      default_policy = default_policy,
+      nullable = schema_is_nullable(x),
+      tunable = FALSE,
+      container = container,
+      broadcast = FALSE,
+      min_items = as.integer(
+        if (container == "map") {
+          x[["minProperties"]] %||% 0L
+        } else {
+          x[["minItems"]] %||% 1L
+        }
+      ),
+      max_items = if (
+        is.null(x[["maxItems"]]) && is.null(x[["maxProperties"]])
+      ) {
+        NULL
+      } else {
+        as.integer(x[["maxItems"]] %||% x[["maxProperties"]])
+      },
+      group = ann[["group"]],
+      data_dependent = isTRUE(ann[["data_dependent"]]),
+      data_bound = data_bound,
+      applies_when = applies_when,
+      default_on_null = isTRUE(ann[["default_on_null"]]),
+      description = description
+    ))
+  }
+
+  if (constant) {
+    if (
+      !is.null(declarations) &&
+        (!default_present ||
+          !identical(default, coerce_to_type(x[["const"]], type)))
+    ) {
+      rtemis.core::abort(
+        "Constant default contradicts its schema at ",
+        path,
+        ".",
+        class = "rtemis_schema_error"
+      )
+    }
+    # `const` is the whole schema for a constant: bounds and enum were never
+    # emitted because `prop_const()` never sets them.
+    return(PropertySpec(
+      type = type,
+      default = coerce_to_type(x[["const"]], type),
+      nullable = FALSE,
+      tunable = FALSE,
+      container = "none",
+      broadcast = FALSE,
+      constant = TRUE,
+      group = ann[["group"]],
+      description = description
+    ))
+  }
+
+  if (container == "table") {
+    # Column defaults are declaration metadata, separate from table values.
+    return(members_spec(
+      x[["items"]],
+      x,
+      ann,
+      "table",
+      data_bound,
+      description,
+      declarations,
+      path,
+      default,
+      default_present,
+      default_policy,
+      decode_reference
+    ))
+  }
+  if (container == "struct") {
+    # A struct emits its object shape directly.
+    return(members_spec(
+      x,
+      x,
+      ann,
+      "struct",
+      data_bound,
+      description,
+      declarations,
+      path,
+      default,
+      default_present,
+      default_policy,
+      decode_reference
+    ))
+  }
+
+  child <- schema_element(x, container, tunable, broadcast)
+  # Explicit cell declarations carry annotations on the element schema,
+  # including a matrix cell; an implicit scalar leaf carries none.
+  items <- if (
+    container %in% c("array", "map", "matrix") && !is.null(child[["x-rtemis"]])
+  ) {
+    schema_to_spec(
+      child,
+      declarations = declarations,
+      path = paste0(path, schema_child_pointer(x, child)),
+      decode_reference = decode_reference
+    )
+  } else {
+    NULL
+  }
+  # When `@items` is set the outer spec's own bounds are unused (`prop_array()`
+  # and `prop_map()` leave them NULL), so the leaf keywords belong to the item.
+  leaf <- if (is.null(items)) child else list()
+  as_bound <- function(v) {
+    if (is.null(v)) {
+      NULL
+    } else if (type == "integer") {
+      as.integer(v)
+    } else {
+      as.numeric(v)
+    }
+  }
+
+  leaf_enum <- if (is.null(leaf[["enum"]])) {
+    NULL
+  } else {
+    # A nullable property lists `null` among its permitted values, `enum` being
+    # stricter than the type union and otherwise rejecting it. That membership
+    # is nullability, which `schema_is_nullable()` reads from the type -- so it
+    # is dropped here, which keeps it out of the levels as the string "NULL".
+    # It arrives as a
+    # `NULL` element under `simplifyVector = FALSE` and as `NA` under the
+    # simplified parse; both mean the same thing here.
+    values <- Filter(
+      function(v) !is.null(v) && !is.na(v),
+      as.list(leaf[["enum"]])
+    )
+    as.character(unlist(values))
+  }
+  # `minItems` / `uniqueItems` sit on the array form, which for a broadcast
+  # property is the trailing `oneOf` branch.
+  arity <- if (container == "array") {
+    schema_array(x, broadcast, tunable)
+  } else {
+    list()
+  }
+  PropertySpec(
+    type = type,
+    default = if (is.null(declarations)) {
+      coerce_to_type(default, type)
+    } else {
+      default
+    },
+    default_present = default_present,
+    default_policy = default_policy,
+    minimum = as_bound(leaf[["minimum"]]),
+    maximum = as_bound(leaf[["maximum"]]),
+    exclusive_minimum = as_bound(leaf[["exclusiveMinimum"]]),
+    exclusive_maximum = as_bound(leaf[["exclusiveMaximum"]]),
+    enum = leaf_enum,
+    nullable = schema_is_nullable(x),
+    allow_missing = isTRUE(ann[["allow_missing"]]),
+    tunable = tunable,
+    container = container,
+    items = items,
+    broadcast = broadcast,
+    min_items = as.integer(arity[["minItems"]] %||% 1L),
+    unique_items = isTRUE(arity[["uniqueItems"]]),
+    # The `contains` bound sits on the array form beside `minItems`. Without
+    # this the round trip drops it: a class reconstructed from its own schema
+    # would accept a collection the original rejects.
+    contains_min = as_bound(arity[["contains"]][["minimum"]]),
+    tune_on_null = isTRUE(ann[["tune_on_null"]]),
+    default_on_null = isTRUE(ann[["default_on_null"]]),
+    data_bound = data_bound,
+    data_dependent = isTRUE(ann[["data_dependent"]]),
+    applies_when = applies_when,
+    group = ann[["group"]],
+    description = description
+  )
+} # /rtemis::schema_to_spec
+
+
+# %% JSONSchema_to_S7 ----
+#' Build an S7 class from a JSON Schema
+#'
+#' The read direction of [S7_to_JSONSchema]: reads each property's
+#' `PropertySpec` back out of the schema and assembles a live S7 class whose
+#' properties carry the same types, bounds, enums, containers, and validators as
+#' the class the schema was generated from.
+#'
+#' Defaults are supplied in a separate versioned artifact keyed by schema `$id`.
+#' The published schemas carry no `default` keywords. Absent declaration defaults remain absent;
+#' constructing a non-nullable property without a default requires a value.
+#'
+#' Properties holding a nested config are published as a `$ref` to that config's
+#' own schema. Supply the parsed graph through `schemas` and the format version 1
+#' artifact through `defaults` to reconstruct these references. Independently
+#' supplied S7 reference classes can be passed through `refs`.
+#' Reconstructed constructors use declaration defaults; input resolution policies
+#' remain separate metadata on the class.
+#'
+#' @param schema Named list: A JSON Schema, as produced by [S7_to_JSONSchema]
+#' or parsed from the published tree with `jsonlite::fromJSON(simplifyVector =
+#' FALSE)`.
+#' @param defaults Optional named list: Format version 1 defaults artifact, or explicit
+#' property declaration values for an independently supplied schema.
+#' @param refs Optional named list: Property name to S7 class, for properties
+#' published as a `$ref` to another schema.
+#' @param authoring Optional named list: Property name to logical authorship
+#' policy, from the separate authoring artifact under this schema's `$id`.
+#' @param name Optional Character: Class name. Defaults to the schema `title`.
+#' @param package Optional Character: Package name recorded on the class.
+#' @param declarations Optional List: Declaration descriptors keyed by schema pointer.
+#' @param schemas Optional List: Complete parsed schema graph keyed by canonical ID.
+#' Used with a format version 1 artifact to reconstruct typed references without source classes.
+#' @param decode_reference Optional Function: Reference decoder for a custom artifact graph.
+#' @param parent Optional S7 class: Reconstructed parent type.
+#' @param policies Optional List: Serialized input policy descriptors.
+#'
+#' @return S7 class.
+#'
+#' @author EDG
+#' @export
+#' @examples
+#' # A schema as `S7_to_JSONSchema()` emits it: standard keywords carry the
+#' # bounds, `x-rtemis` carries the leaf type.
+#' schema <- list(
+#'   title = "Demo",
+#'   properties = list(
+#'     k = list(
+#'       type = "integer",
+#'       minimum = 1L,
+#'       maximum = 10L,
+#'       description = "Number of components.",
+#'       `x-rtemis` = list(type = "integer")
+#'     )
+#'   )
+#' )
+#' Demo <- JSONSchema_to_S7(schema, defaults = list(k = 2L))
+#' Demo()@k
+#' Demo(k = 5L)@k
+#' # The reconstructed class enforces the schema's bounds.
+#' tryCatch(Demo(k = 99L), error = conditionMessage)
+JSONSchema_to_S7 <- function(
+  schema,
+  defaults = NULL,
+  refs = NULL,
+  name = NULL,
+  package = NULL,
+  authoring = NULL,
+  declarations = NULL,
+  schemas = NULL,
+  decode_reference = NULL,
+  parent = NULL,
+  policies = NULL
+) {
+  if (!is.null(schemas)) {
+    return(default_artifact_graph(schemas, defaults, authoring)[[
+      "class"
+    ]](schema[["$id"]]))
+  }
+  if (!is.list(schema) || is.null(schema[["properties"]])) {
+    rtemis.core::abort(
+      "`schema` must be a JSON Schema with a `properties` object.",
+      class = c("rtemis_type_error", "rtemis_input_error")
+    )
+  }
+  parent_identity <- schema[["x-rtemis"]][["publication"]][["parent"]]
+  if (!is.null(parent_identity)) {
+    if (is.null(parent)) {
+      rtemis.core::abort(
+        "A published parent requires the artifact graph in `schemas` or an explicit `parent`.",
+        class = "rtemis_schema_error"
+      )
+    }
+    # Any parent would satisfy a presence check; the schema names one.
+    supplied <- paste0(parent@package, "::", parent@name)
+    if (!identical(supplied, parent_identity)) {
+      rtemis.core::abort(
+        "`parent` is ",
+        supplied,
+        " but the schema declares ",
+        parent_identity,
+        ".",
+        class = "rtemis_schema_error"
+      )
+    }
+  }
+  if (
+    any(c("$id", "declarations", "resolution") %in% names(defaults)) &&
+      is.null(defaults[["format_version"]])
+  ) {
+    rtemis.core::abort(
+      "Defaults artifact lacks its format version.",
+      class = "rtemis_schema_error"
+    )
+  }
+  if (!is.null(defaults[["format_version"]])) {
+    if (!identical(defaults[["format_version"]], 1L)) {
+      rtemis.core::abort(
+        "Unsupported defaults artifact version.",
+        class = "rtemis_schema_error"
+      )
+    }
+    declarations <- defaults[["declarations"]][[schema[["$id"]]]]
+    if (is.null(declarations)) {
+      rtemis.core::abort(
+        "Defaults artifact has no declaration for this schema.",
+        class = "rtemis_schema_error"
+      )
+    }
+    policies <- defaults[["resolution"]][[schema[["$id"]]]] %||% list()
+    defaults <- NULL
+  }
+  props <- schema[["properties"]]
+  # `$schema` identifies the document, not a field of the class.
+  props[["$schema"]] <- NULL
+  if (!is.null(authoring)) {
+    if (
+      !is.list(authoring) ||
+        is.null(names(authoring)) ||
+        anyNA(names(authoring)) ||
+        any(!nzchar(names(authoring))) ||
+        anyDuplicated(names(authoring)) > 0L ||
+        length(setdiff(names(authoring), names(props))) > 0L ||
+        !all(vapply(
+          authoring,
+          function(value) {
+            is.logical(value) && length(value) == 1L && !is.na(value)
+          },
+          logical(1L)
+        ))
+    ) {
+      rtemis.core::abort(
+        "`authoring` must map declared property names to non-missing logical scalars.",
+        class = c("rtemis_value_error", "rtemis_input_error")
+      )
+    }
+  }
+
+  is_ref <- vapply(
+    props,
+    function(p) {
+      !is.null(p[["$ref"]]) ||
+        any(vapply(
+          p[["oneOf"]] %||% list(),
+          function(b) !is.null(b[["$ref"]]),
+          logical(1L)
+        ))
+    },
+    logical(1L)
+  )
+  is_ref <- is_ref &
+    vapply(
+      props,
+      function(p) {
+        is.null(p[["x-rtemis"]][["target_class"]]) &&
+          !identical(p[["x-rtemis"]][["type"]], "union")
+      },
+      logical(1L)
+    )
+  unresolved <- setdiff(names(props)[is_ref], names(refs))
+  if (length(unresolved) > 0L) {
+    rtemis.core::abort(
+      "No class supplied for `$ref` propert",
+      if (length(unresolved) == 1L) "y: " else "ies: ",
+      paste(unresolved, collapse = ", "),
+      ". Pass them in `refs`.",
+      class = c("rtemis_value_error", "rtemis_input_error")
+    )
+  }
+
+  spec_names <- names(props)[!is_ref]
+  specs <- lapply(spec_names, function(nm) {
+    spec <- if (!is.null(declarations)) {
+      schema_to_spec(
+        props[[nm]],
+        declarations = declarations,
+        path = paste0("/properties/", default_pointer(nm)),
+        decode_reference = decode_reference
+      )
+    } else if (nm %in% names(defaults)) {
+      schema_to_spec(props[[nm]], default = defaults[[nm]])
+    } else {
+      schema_to_spec(props[[nm]])
+    }
+    spec@agent_writable <- authoring[[nm]]
+    spec
+  })
+  names(specs) <- spec_names
+
+  properties <- lapply(names(props), function(nm) {
+    if (is_ref[[nm]]) {
+      cls <- refs[[nm]]
+      return(if (schema_is_nullable(props[[nm]])) NULL | cls else cls)
+    }
+    prop <- make_prop(specs[[nm]])
+    if (
+      !is.null(decode_reference) &&
+        is.null(prop[["getter"]]) &&
+        is.null(prop[["setter"]])
+    ) {
+      prop <- artifact_presence_property(prop, nm)
+    }
+    # `readOnly` is how run state appears in the published contract.
+    if (isTRUE(props[[nm]][["readOnly"]])) prop_state(prop) else prop
+  })
+  names(properties) <- names(props)
+  runtime <- schema[["x-rtemis"]][["runtime_properties"]]
+  for (nm in names(runtime)) {
+    if (
+      nm %in% names(properties) || !identical(runtime[[nm]][["kind"]], "opaque")
+    ) {
+      rtemis.core::abort(
+        "Invalid runtime property declaration: ",
+        nm,
+        class = "rtemis_schema_error"
+      )
+    }
+    properties[[nm]] <- prop_runtime(runtime[[nm]][["description"]])
+  }
+
+  rules <- lapply(
+    schema[["x-rtemis"]][["rules"]] %||% list(),
+    schema_rule_from_fields
+  )
+  if (!is.null(parent)) {
+    inherited <- schema_rules(parent)
+    inherited_ids <- vapply(inherited, `[[`, character(1L), "id")
+    declared_ids <- vapply(rules, function(rule) rule@id, character(1L))
+    if (length(setdiff(inherited_ids, declared_ids))) {
+      rtemis.core::abort(
+        "Child schema is missing inherited rules.",
+        class = "rtemis_schema_error"
+      )
+    }
+    for (i in seq_along(inherited)) {
+      rule <- rules[[match(inherited_ids[[i]], declared_ids)]]
+      if (!identical(schema_rule_fields(rule), inherited[[i]])) {
+        rtemis.core::abort(
+          "Child schema changes an inherited rule.",
+          class = "rtemis_schema_error"
+        )
+      }
+    }
+    rules <- rules[!declared_ids %in% inherited_ids]
+  }
+  policy_objects <- lapply(names(policies), function(nm) {
+    default_policy_from_wire(
+      policies[[nm]],
+      props[[nm]],
+      decode_reference,
+      preserve_reference = TRUE
+    )
+  })
+  names(policy_objects) <- names(policies)
+  constructor <- NULL
+  if (!is.null(parent)) {
+    .artifact_parent <- parent
+    constructor <- function() new_object(.artifact_parent())
+    formals(constructor) <- as.pairlist(lapply(properties, function(p) {
+      p[["default"]]
+    }))
+    parent_names <- intersect(names(parent@properties), names(properties))
+    parent_call <- as.call(c(
+      list(as.name(".artifact_parent")),
+      stats::setNames(lapply(parent_names, as.name), parent_names)
+    ))
+    body(constructor) <- as.call(c(
+      list(as.name("new_object"), parent_call),
+      stats::setNames(lapply(names(properties), as.name), names(properties))
+    ))
+  }
+  cls <- schema_class(
+    name = name %||% schema[["title"]] %||% "JSONSchemaClass",
+    package = package,
+    properties = properties,
+    parent = parent %||% S7_object,
+    constructor = constructor,
+    defaults = if (length(policy_objects)) policy_objects else NULL,
+    validator = if (
+      any(vapply(specs, function(s) !is.null(s@applies_when), logical(1L)))
+    ) {
+      function(self) check_applies_when(self)
+    } else {
+      NULL
+    },
+    rules = rules
+  )
+  attr(cls, "rtemis_artifact_schema") <- schema
+  if (!is.null(policies)) {
+    attr(cls, "rtemis_artifact_policies") <- policy_objects
+  }
+  cls
+} # /rtemis::JSONSchema_to_S7
+
+
+# %% artifact_presence_property ----
+#' Track assignments to properties reconstructed from serialized documents
+#' @param property S7 property: Stored declaration with ordinary attribute storage.
+#' @param name Character: Property name.
+#' @return S7 property retaining its declaration and recording explicit assignments.
+#' @keywords internal
+#' @noRd
+artifact_presence_property <- function(property, name) {
+  force(name)
+  fields <- get_spec_fields(property)
+  property[["setter"]] <- function(self, value) {
+    problem <- validate_value(value, fields)
+    if (!is.null(problem)) {
+      rtemis.core::abort(name, " ", problem, class = "rtemis_value_error")
+    }
+    attr(self, name) <- value
+    present <- attr(self, "rtemis_artifact_fields")
+    if (!is.null(present)) {
+      # The constructor validates after all setters have initialized storage.
+      # Decoded objects additionally validate class rules on later assignments.
+      S7::validate(self)
+      attr(self, "rtemis_artifact_fields") <- union(present, name)
+    }
+    self
+  }
+  property
+}
+
+
+# %% artifact_present_names ----
+#' Preserve omitted fields when serializing an artifact-reconstructed object
+#' @param value S7 object: Reconstructed or native object.
+#' @param names Character: Otherwise eligible property names.
+#' @return Character: Explicitly present names, or all eligible names for native objects.
+#' @keywords internal
+#' @noRd
+artifact_present_names <- function(value, names) {
+  present <- attr(value, "rtemis_artifact_fields")
+  if (is.null(present)) names else intersect(names, present)
+}

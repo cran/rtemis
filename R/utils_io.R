@@ -1,6 +1,6 @@
 # utils_io.R
 # ::rtemis::
-# 2022 EDG rtemis.org
+# 2022- EDG rtemis.org
 
 #' Write \pkg{rtemis} model to RDS file
 #'
@@ -45,10 +45,8 @@ rt_save <- function(
       if (print_load_info) {
         msg0(gray(
           paste0(
-            "Reload with: ",
-            "> obj <- readRDS('",
-            rds_path,
-            "')"
+            "Saved ",
+            rds_path
           )
         ))
       }
@@ -117,15 +115,19 @@ check_files <- function(paths, verbosity = 1L, pad = 0) {
 #' @param allow_urls Logical: If TRUE, allow URL schemes (http://, https://, etc.).
 #' @param type Character: Expected path type - "file", "directory", or "any". Only checked
 #' if `must_exist = TRUE`.
+#' @param normalize Logical: If TRUE, return the absolute, normalized path. If FALSE, return
+#' `path` exactly as given; every check still runs against its normalized form. A path that is
+#' *stored* (a config's `outdir` or data path) passes FALSE: a config is a portable recipe, and
+#' resolving a path against the current working directory pins it to one machine.
 #'
-#' @return Character: Sanitized and normalized absolute path.
+#' @return Character: Sanitized path; absolute and normalized unless `normalize = FALSE`.
 #'
 #' @details
 #' Security checks performed:
 #' - Rejects paths starting with pipe character (prevents command injection in R readers)
 #' - Rejects paths containing null bytes
 #' - Rejects URL schemes unless `allow_urls = TRUE`
-#' - Normalizes path to absolute form
+#' - Normalizes path to absolute form for the checks below
 #' - Optionally validates path exists and is correct type
 #' - Optionally validates path is within allowed base directory
 #'
@@ -137,7 +139,8 @@ sanitize_path <- function(
   must_exist = FALSE,
   allowed_base = NULL,
   allow_urls = FALSE,
-  type = c("any", "file", "directory")
+  type = c("any", "file", "directory"),
+  normalize = TRUE
 ) {
   type <- match.arg(type)
 
@@ -251,5 +254,13 @@ sanitize_path <- function(
     }
   }
 
-  normalized_path
+  # `normalizePath()` resolves a relative path against the working directory --
+  # on Windows even one that does not exist, on POSIX only one that does -- and
+  # expands `~`, so what it returns is machine- and platform-specific. Callers
+  # that store the result ask for the path as written instead.
+  if (normalize) {
+    normalized_path
+  } else {
+    path
+  }
 } # /rtemis::sanitize_path

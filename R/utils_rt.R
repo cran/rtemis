@@ -48,14 +48,23 @@ intro <- function(
 } # /rtemis::intro
 
 
-# Function to output seconds if seconds < 60, otherwise output minutes
+# Format duration: seconds if < 60, otherwise M:SS or H:MM:SS
+# (matching the format used by rtemis.core progress reporting)
 #' @keywords internal
 #' @noRd
 format_seconds <- function(seconds) {
   if (seconds < 60) {
     paste0(bold(ddSci(seconds)), " seconds")
   } else {
-    paste0(bold(ddSci(round(seconds / 60))), " minutes")
+    s <- as.integer(round(seconds))
+    h <- s %/% 3600L
+    m <- (s %% 3600L) %/% 60L
+    sec <- s %% 60L
+    if (h > 0L) {
+      bold(sprintf("%d:%02d:%02d", h, m, sec))
+    } else {
+      bold(sprintf("%d:%02d", m, sec))
+    }
   }
 }
 
@@ -86,8 +95,7 @@ outro <- function(
     if (real_user_system) {
       msg0(
         paste0(
-          checkmark(),
-          " Done in ",
+          "Done in ",
           format_seconds(elapsed[3]),
           " (",
           "Real:",
@@ -103,8 +111,7 @@ outro <- function(
     } else {
       msg0(
         paste0(
-          checkmark(),
-          " Done in ",
+          "Done in ",
           format_seconds(elapsed[3]),
           "."
         ),
@@ -184,6 +191,45 @@ summarize_unsupervised <- function(x) {
     "features."
   )
 } # /rtemis::summarize_unsupervised
+
+
+#' Resolve an unsupervised run's feature columns
+#'
+#' The columns a clustering or decomposition run uses when its config names
+#' none: every numeric column of `x`. `cluster()`, `decomp()` and the
+#' decomposition step inside `train()` all resolve it here, so the fit, the run
+#' record and `checks/v1` name the same columns, and the published schemas'
+#' "null = all numeric features" is one rule.
+#'
+#' Resolved from the data, so no default policy can express it: which columns
+#' are numeric is a fact about the dataset.
+#'
+#' @param x data.frame: The features to run on; no outcome column.
+#' @param what Character: What is being fit, for the error message.
+#'
+#' @return Character vector: Names of the numeric columns of `x`.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+resolve_unsupervised_features <- function(x, what) {
+  features <- getnumericnames(x)
+  if (length(features) < 2L) {
+    rtemis.core::abort(
+      what,
+      " requires at least 2 numeric feature columns; ",
+      NCOL(x),
+      ngettext(NCOL(x), " column", " columns"),
+      " supplied, of which ",
+      length(features),
+      if (length(features) == 1L) " is numeric." else " are numeric.",
+      "\nName the columns to use in the config's `features`, or supply ",
+      "numeric data.",
+      class = c("rtemis_length_error", "rtemis_input_error")
+    )
+  }
+  features
+} # /rtemis::resolve_unsupervised_features
 
 
 #' Log to file

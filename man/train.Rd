@@ -9,17 +9,16 @@ train(
   dat_validation = NULL,
   dat_test = NULL,
   weights = NULL,
-  algorithm = NULL,
   preprocessor_config = NULL,
   decomposition_config = NULL,
   hyperparameters = NULL,
   tuner_config = NULL,
   outer_resampling_config = NULL,
-  execution_config = setup_ExecutionConfig(),
+  execution_config = setup_FutureExecution(),
   question = NULL,
   outdir = NULL,
+  preflight = FALSE,
   verbosity = 1L,
-  progress = NULL,
   ...
 )
 }
@@ -32,9 +31,7 @@ train(
 
 \item{weights}{Optional vector of case weights.}
 
-\item{algorithm}{Character: Algorithm to use. Can be left NULL, if \code{hyperparameters} is defined.}
-
-\item{preprocessor_config}{Optional PreprocessorConfig object: Setup using \link{setup_Preprocessor}.}
+\item{preprocessor_config}{Optional SupervisedPreprocessorConfig object: Setup using \link{setup_SupervisedPreprocessor}.}
 
 \item{decomposition_config}{Optional DecompositionConfig object: Setup using a decomposition
 \verb{setup_*} function.}
@@ -43,38 +40,36 @@ train(
 
 \item{tuner_config}{TunerConfig object: Setup using \link{setup_GridSearch}.}
 
-\item{outer_resampling_config}{Optional ResamplerConfig object: Setup using \link{setup_Resampler}.
+\item{outer_resampling_config}{Optional ResamplerConfig object: Setup using
+one of the \verb{setup_*} resampler functions, e.g. \link{setup_KFold}.
 This defines the outer resampling method, i.e. the splitting into training and test sets for the
 purpose of assessing model performance. If NULL, no outer resampling is performed, in which case
 you might want to use a \code{dat_test} dataset to assess model performance on a single test set.}
 
-\item{execution_config}{\code{ExecutionConfig} object: Setup using \link{setup_ExecutionConfig}. This
-allows you to set backend ("future", "mirai", or "none"), number of workers, and future plan if
-using \code{backend = "future"}.}
+\item{execution_config}{\code{ExecutionConfig} object: Setup using
+\link{setup_SerialExecution}, \link{setup_FutureExecution} or \link{setup_MiraiExecution}.
+The function you call selects the backend; each sets the number of workers
+per dispatch level, and \link{setup_FutureExecution} additionally sets the future
+plan.}
 
 \item{question}{Optional character string defining the question that the model is trying to
 answer.}
 
-\item{outdir}{Character, optional: String defining the output directory.}
+\item{outdir}{Character, optional: String defining the output directory. The
+fitted model is saved there as \verb{train_<algorithm>.rds}, alongside a run
+record, \verb{train_<algorithm>.record.json}, stating what the run actually did:
+every value resolved, where each came from, and what produced it. See
+\link{write_record}.}
+
+\item{preflight}{Logical: If TRUE, check the configuration against \code{x} with
+\link{validate_config} before training and stop on any finding of severity
+"error". Findings of severity "warning" are reported and training continues.
+Defaults to FALSE, except for a \code{SuperConfigTabular}, where it defaults to TRUE:
+that type binds its data in memory and is what a server hands a run it
+accepted on a client's behalf, so the check is that type's default. Pass
+FALSE explicitly to skip it.}
 
 \item{verbosity}{Integer: Verbosity level.}
-
-\item{progress}{Optional function: Callback invoked at progress
-checkpoints during training. When supplied, called at each outer
-resampling fold boundary as
-\code{progress(stage, current, total, message)}:
-\describe{
-\item{\code{stage}}{Character. Currently \code{"outer_fold"}.}
-\item{\code{current}}{Integer. 1-based index of the fold about to run.}
-\item{\code{total}}{Integer. Total number of outer folds.}
-\item{\code{message}}{Character. Human-readable line, e.g.
-\code{"Outer fold 2/5"}.}
-}
-When \code{NULL}, the existing \code{cli::cli_progress_along()}
-interactive progress bar runs untouched. Designed for non-interactive
-callers (e.g. \code{rtemis.server}) that need to forward fold progress
-over a wire protocol; errors raised by the callback are swallowed
-so a broken sink cannot interrupt training.}
 
 \item{...}{Not used.}
 }
@@ -110,6 +105,13 @@ User-defined preprocessing through \code{preprocessor_config} is applied on trai
 the learned parameters are stored in the returned Supervised or SupervisedRes object, and the
 preprocessing is applied on validation and test data.
 
+For missing values, prefer an algorithm that accepts them, such as LightGBM, LightRF, Ranger
+or CART. For an algorithm that requires complete data, impute with
+\code{setup_SupervisedPreprocessor(impute = TRUE)}, which uses mean and mode imputation by
+default. missRanger imputation is fitted on every training set, including every tuning
+resample, and multiplies the memory and computation of a run; see the Imputation section of
+\link{setup_SupervisedPreprocessor}.
+
 \strong{Binary Classification}
 
 For binary classification, the outcome should be a factor where \emph{the 2nd level
@@ -127,14 +129,14 @@ test error.
 
 If using \emph{\strong{outer resampling}}, you can set a seed when defining \code{outer_resampling_config}, e.g.
 
-\if{html}{\out{<div class="sourceCode r">}}\preformatted{outer_resampling_config = setup_Resampler(n_resamples = 10L, type = "KFold", seed = 2026L)
+\if{html}{\out{<div class="sourceCode r">}}\preformatted{outer_resampling_config = setup_KFold(n_resamples = 10L, seed = 2026L)
 }\if{html}{\out{</div>}}
 
 If using \emph{\strong{tuning with inner resampling}}, you can set a seed when defining \code{tuner_config},
 e.g.
 
 \if{html}{\out{<div class="sourceCode r">}}\preformatted{tuner_config = setup_GridSearch(
-  resampler_config = setup_Resampler(n_resamples = 5L, type = "KFold", seed = 2027L)
+  resampler_config = setup_KFold(n_resamples = 5L, seed = 2027L)
 )
 }\if{html}{\out{</div>}}
 
@@ -143,24 +145,33 @@ e.g.
 There are three levels of parallelization that may be used during training:
 \enumerate{
 \item Algorithm training (e.g. a parallelized learner like LightGBM)
-\item Tuning (inner resampling, where multiple resamples can be processed in parallel)
+\item Tuning (where the full hyperparameter combination x inner resample cross product is
+processed in parallel, not just the resamples)
 \item Outer resampling (where multiple outer resamples can be processed in parallel)
 }
 
-The \code{train()} function will automatically manage parallelization depending
-on:
-\itemize{
-\item The number of workers specified by the user using \code{n_workers}
-\item Whether the training algorithm supports parallelization itself
-\item Whether hyperparameter tuning is needed
-}
+\code{train()} assigns all workers to exactly one of these levels, so that no two levels
+compete for the same cores. The level is chosen by the first of these that applies:
+the algorithm parallelizes itself, tuning is needed, outer resampling is set. A run
+that needs none of them is sequential.
+
+The workers, backend, and future plan all come from \code{execution_config}; see
+\link{setup_FutureExecution}.
+
+\strong{Reproducibility under parallelization}
+
+\code{execution_config} carries the master seed for the run's computation RNG, from which
+one independent substream per outer resample is derived and assigned by fold index.
+Results therefore do not depend on the backend, the number of workers, or the order
+folds happened to finish in: a parallel run reproduces its sequential counterpart
+exactly.
 }
 \examples{
 \donttest{
 iris_c_lightRF <- train(
    iris,
-   algorithm = "LightRF",
-   outer_resampling_config = setup_Resampler(),
+   hyperparameters = setup_LightRF(),
+   outer_resampling_config = setup_KFold(n_resamples = 3L)
 )
 }
 }

@@ -22,7 +22,7 @@ method(train_, LightGBMHyperparameters) <- function(
   x,
   weights = NULL,
   dat_validation = NULL,
-  execution_config = setup_ExecutionConfig(),
+  execution_config = setup_FutureExecution(),
   verbosity = 1L
 ) {
   # Dependencies ----
@@ -37,11 +37,10 @@ method(train_, LightGBMHyperparameters) <- function(
     )
   }
 
-  # Convert "null" nrounds to max_nrounds
-  if (hyperparameters[["nrounds"]] == "null") {
-    hyperparameters@hyperparameters[["nrounds"]] <- hyperparameters[[
-      "max_nrounds"
-    ]]
+  # When nrounds is unset (NULL), train up to max_nrounds using early
+  # stopping. (During tuning, the best iteration is captured as best_iter.)
+  if (is.null(hyperparameters[["nrounds"]])) {
+    hyperparameters@nrounds <- hyperparameters[["max_nrounds"]]
   }
 
   # Data ----
@@ -60,9 +59,7 @@ method(train_, LightGBMHyperparameters) <- function(
     nclasses <- 1L
   }
   if (is.null(hyperparameters[["objective"]])) {
-    hyperparameters@hyperparameters[["objective"]] <- if (
-      type == "Regression"
-    ) {
+    hyperparameters@objective <- if (type == "Regression") {
       "regression"
     } else {
       if (nclasses == 2L) {
@@ -98,6 +95,16 @@ method(train_, LightGBMHyperparameters) <- function(
   # Set n threads
   params[["num_threads"]] <- prop(hyperparameters, "n_workers")
 
+  # An unset hyperparameter is NULL, and LightGBM does not treat a NULL as
+  # absent: it parses the empty value as 0 and fails its own range check
+  # (`alpha = NULL` aborts with "Check failed: (alpha) > (0.0)"). So NULL means
+  # "leave it to the backend", which is expressed by not sending it at all.
+  params <- c(
+    params,
+    lightgbm_device_params(hyperparameters, execution_config@device)
+  )
+  params <- Filter(Negate(is.null), params)
+
   model <- lightgbm::lgb.train(
     params = params,
     data = x,
@@ -111,7 +118,14 @@ method(train_, LightGBMHyperparameters) <- function(
     verbose = verbosity - 1L
   )
   check_inherits(model, "lgb.Booster")
-  list(model = model, preprocessor = prp)
+  # `hyperparameters` is returned because this method resolved values into
+  # it (R copied the caller's object, so the caller cannot see them).
+  # `train()` adopts them, and the fitted model reports what it used.
+  hyperparameters <- record_backend_values(
+    hyperparameters,
+    lightgbm_backend_values(hyperparameters, model)
+  )
+  list(model = model, preprocessor = prp, hyperparameters = hyperparameters)
 } # /rtemis::train_.LightGBMHyperparameters
 
 
@@ -129,17 +143,67 @@ method(predict_super, class_lgb.Booster) <- function(
   model,
   newdata,
   type = NULL,
+  execution_config = NULL,
   verbosity = 0L
 ) {
   check_inherits(model, "lgb.Booster")
   check_inherits(newdata, "data.frame")
 
   # Algorithm-specific preprocessing (factor2integer) is applied by
-  # predict.Supervised before calling this method. See R/train.R and R/07_Supervised.R
+  # predict.Supervised before calling this method. See R/train.R and R/200_Supervised.R
 
   # Predict ----
-  predict(model, newdata = as.matrix(newdata))
+  # The booster keeps the `num_threads` it was trained with; prediction uses the
+  # count resolved where it runs.
+  predict(
+    model,
+    newdata = as.matrix(newdata),
+    params = list(num_threads = algorithm_threads(execution_config))
+  )
 } # /rtemis::predict_super.lgb.Booster
+
+
+# %% learning_curve_super.lgb.Booster ----
+#' Learning curve of a boosted model
+#'
+#' One step is one boosting iteration. The booster records an evaluation log per
+#' dataset it was given, so the training series is always present and the
+#' validation series appears when `dat_validation` was passed. Shared by every
+#' algorithm whose fitted object is an `lgb.Booster`.
+#'
+#' @param model `lgb.Booster` object.
+#'
+#' @return data.frame, as `learning_curve_frame()` shapes it.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+method(learning_curve_super, class_lgb.Booster) <- function(model) {
+  evaluations <- model[["record_evals"]]
+  series <- function(dataset) {
+    entry <- evaluations[[dataset]]
+    if (is.null(entry) || length(entry) == 0L) {
+      return(NULL)
+    }
+    # One metric per booster here; the first is the objective it optimized.
+    unlist(entry[[1L]][["eval"]], use.names = FALSE)
+  }
+  training <- series("training")
+  validation <- series("validation")
+  best <- model[["best_iter"]]
+  learning_curve_frame(
+    loss_training = training,
+    loss_validation = validation,
+    unit = "boosting iterations",
+    # `best_iter` is -1 where no early stopping ran, and the model then kept
+    # every iteration it was asked for.
+    selected = if (is.null(best) || is.na(best) || best < 1L) {
+      max(length(training), length(validation))
+    } else {
+      best
+    }
+  )
+} # /rtemis::learning_curve_super.lgb.Booster
 
 
 # %% varimp_super.class_lgb.Booster ----
@@ -152,6 +216,242 @@ method(predict_super, class_lgb.Booster) <- function(
 method(varimp_super, class_lgb.Booster) <- function(model) {
   check_inherits(model, "lgb.Booster")
   vi <- lightgbm::lgb.importance(model, percentage = TRUE) # -> data.table
-  names(vi)[1] <- "variable"
-  VariableImportance(vi)
+  if (nrow(vi) == 0L) {
+    return(NULL)
+  }
+  omitted <- " Predictors in no split are omitted."
+  VariableImportance(
+    measures = list(
+      Gain = importance_measure(
+        vi[["Feature"]],
+        vi[["Gain"]],
+        kind = "split_gain",
+        description = paste0(
+          "Share of the total gain of all splits, over all trees, that comes ",
+          "from splits on the predictor, on the training cases (lightgbm).",
+          omitted
+        )
+      ),
+      Cover = importance_measure(
+        vi[["Feature"]],
+        vi[["Cover"]],
+        kind = "split_cover",
+        description = paste0(
+          "Share of the training cases reaching split nodes, summed over all ",
+          "splits of all trees, that reach splits on the predictor (lightgbm).",
+          omitted
+        )
+      ),
+      Frequency = importance_measure(
+        vi[["Feature"]],
+        vi[["Frequency"]],
+        kind = "split_frequency",
+        description = paste0(
+          "Share of all splits, over all trees, that use the predictor ",
+          "(lightgbm).",
+          omitted
+        )
+      )
+    )
+  )
 } # /rtemis::varimp_super.lgb.Booster
+
+
+# %% explain_super.class_lgb.Booster ----
+#' TreeSHAP contributions from a LightGBM booster
+#'
+#' `predict(type = "contrib")` returns `n x (p + 1)` per class, the trailing
+#' column being the baseline. The contributions sum to the **raw margin**, not
+#' to what `predict()` returns: for binary and multiclass objectives `predict()`
+#' applies the link, and comparing contributions against a probability is the
+#' error the additivity test exists to catch.
+#'
+#' Multiclass is laid out as class-major blocks of `p + 1` columns, so class `k`
+#' occupies `(k - 1) * (p + 1) + 1` through `k * (p + 1)`.
+#'
+#' The booster's own contributions are path-dependent -- coalitions are weighted
+#' by the training coverage recorded in the trees -- which is a conditional
+#' value function, and it takes no background. An interventional answer needs
+#' a background and a different estimator, so it is refused.
+#'
+#' @param model `lgb.Booster` object.
+#' @param newdata tabular data: Cases to explain, already transformed.
+#' @param background Optional tabular data: Unused by the path-dependent
+#' estimator.
+#' @param estimator Character: Resolved estimator.
+#' @param perturbation Character: Resolved value function.
+#' @param scale Character: Scale the contributions are additive on.
+#' @param type Character: "Regression" or "Classification".
+#' @param verbosity Integer: Verbosity level.
+#'
+#' @return List with `phi`, `baseline`, `predicted` and `exact`.
+#'
+#' @keywords internal
+#' @noRd
+method(explain_super, class_lgb.Booster) <- function(
+  model,
+  newdata,
+  background,
+  estimator,
+  perturbation,
+  scale,
+  type,
+  verbosity = 0L
+) {
+  check_inherits(model, "lgb.Booster")
+  check_inherits(newdata, "data.frame")
+  if (!identical(estimator, "TreeSHAP")) {
+    rtemis.core::abort(
+      "LightGBM's explain_super() computes TreeSHAP, not ",
+      estimator,
+      ".",
+      class = c("rtemis_unsupported_error", "rtemis_input_error")
+    )
+  }
+  if (!identical(perturbation, "conditional")) {
+    rtemis.core::abort(
+      "Interventional TreeSHAP is not implemented for LightGBM: the booster's ",
+      "own contributions are path-dependent, which is a conditional value ",
+      "function.\n",
+      "Use `setup_SHAP(perturbation = \"conditional\")`, or ",
+      "`setup_SHAP(estimator = \"kernel\", perturbation = \"interventional\")`.",
+      class = c("rtemis_unsupported_error", "rtemis_input_error")
+    )
+  }
+  features <- as.matrix(newdata)
+  contrib <- predict(model, newdata = features, type = "contrib")
+  # The margin, which is what the contributions decompose.
+  margin <- predict(model, newdata = features, type = "raw")
+  # A random forest (LightRF) averages its trees, but LightGBM's raw scores
+  # and contributions sum them (4.7.0): both come back multiplied by the
+  # number of iterations. Dividing restores the margin the model predicts
+  # with, and contributions that decompose it.
+  if (lightgbm_averages_trees(model)) {
+    contrib <- contrib / model[["current_iter"]]()
+    margin <- margin / model[["current_iter"]]()
+  }
+
+  n_features <- NCOL(features)
+  block <- n_features + 1L
+  n_classes <- NCOL(contrib) / block
+  if (n_classes != round(n_classes)) {
+    rtemis.core::abort(
+      "LightGBM returned ",
+      NCOL(contrib),
+      " contribution columns, which is not a multiple of ",
+      block,
+      ".",
+      class = c("rtemis_dim_error", "rtemis_data_error")
+    )
+  }
+  n_classes <- as.integer(n_classes)
+  # `predict(type = "raw")` is a bare vector for one output and a matrix for
+  # several; the object stores one column per class either way.
+  margin <- matrix(margin, ncol = n_classes)
+
+  phi <- vector("list", n_classes)
+  baseline <- numeric(n_classes)
+  for (k in seq_len(n_classes)) {
+    columns <- ((k - 1L) * block + 1L):(k * block)
+    values <- contrib[, columns, drop = FALSE]
+    contributions <- values[, seq_len(n_features), drop = FALSE]
+    colnames(contributions) <- colnames(features)
+    phi[[k]] <- contributions
+    # Constant across cases by construction: it is the model's own expected
+    # value, so the first row carries it.
+    baseline[[k]] <- values[1L, block]
+  }
+  list(
+    phi = phi,
+    baseline = baseline,
+    predicted = margin,
+    exact = TRUE
+  )
+} # /rtemis::explain_super.lgb.Booster
+
+
+# %% lightgbm_averages_trees ----
+#' Does a LightGBM model average its trees?
+#'
+#' True for a random forest (`boosting = "rf"`), whose text model declares
+#' `average_output`. Read from the header of a one-iteration dump, which is
+#' small whatever the model's size.
+#'
+#' @param model `lgb.Booster`.
+#'
+#' @return Logical.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+lightgbm_averages_trees <- function(model) {
+  grepl(
+    "\naverage_output\n",
+    model[["save_model_to_string"]](num_iteration = 1L),
+    fixed = TRUE
+  )
+} # /rtemis::lightgbm_averages_trees
+
+
+# %% lightgbm_training_device ----
+#' The device a LightGBM-family algorithm will train on
+#'
+#' LightGBM, LightRF, LightCART and LightRuleFit run on the CPU, a CUDA GPU or an
+#' OpenCL GPU, each only with a LightGBM build compiled for it. No build can be
+#' detected from R, so the automatic choice is the CPU; a requested `mps` runs
+#' on the CPU.
+#'
+#' @param x Hyperparameters of one of the four classes.
+#' @param requested Optional `DeviceConfig` object.
+#'
+#' @return Character device type.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+lightgbm_training_device <- function(x, requested = NULL) {
+  type <- if (is.null(requested)) "cpu" else requested@type
+  if (type %in% c("cpu", "cuda", "opencl")) type else "cpu"
+} # /rtemis::lightgbm_training_device
+
+
+# %% lightgbm_device_params ----
+#' LightGBM parameters selecting the compute device
+#'
+#' `device_type` in LightGBM's own spelling (`"gpu"` is its OpenCL build), and
+#' `gpu_device_id` for the first GPU a `CUDADeviceConfig` names.
+#'
+#' @param x Hyperparameters of a LightGBM-family class.
+#' @param requested Optional `DeviceConfig` object.
+#'
+#' @return Named list of LightGBM parameters.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+lightgbm_device_params <- function(x, requested = NULL) {
+  device <- lightgbm_training_device(x, requested)
+  params <- list(
+    device_type = switch(device, opencl = "gpu", device)
+  )
+  if (S7_inherits(requested, CUDADeviceConfig) && !is.null(requested@ids)) {
+    params[["gpu_device_id"]] <- requested@ids[[1L]]
+  }
+  params
+} # /rtemis::lightgbm_device_params
+
+
+# %% training_device.LightGBMHyperparameters ----
+method(training_device, LightGBMHyperparameters) <- lightgbm_training_device
+
+
+# %% training_device.LightRFHyperparameters ----
+method(training_device, LightRFHyperparameters) <- lightgbm_training_device
+
+
+# %% training_device.LightCARTHyperparameters ----
+method(training_device, LightCARTHyperparameters) <- lightgbm_training_device
+
+
+# %% training_device.LightRuleFitHyperparameters ----
+method(training_device, LightRuleFitHyperparameters) <- lightgbm_training_device

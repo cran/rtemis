@@ -19,7 +19,7 @@ method(train_, LightCARTHyperparameters) <- function(
   x,
   weights = NULL,
   dat_validation = NULL,
-  execution_config = setup_ExecutionConfig(),
+  execution_config = setup_FutureExecution(),
   verbosity = 1L
 ) {
   # Dependencies ----
@@ -47,9 +47,7 @@ method(train_, LightCARTHyperparameters) <- function(
     nclasses <- 1L
   }
   if (is.null(hyperparameters[["objective"]])) {
-    hyperparameters@hyperparameters[["objective"]] <- if (
-      type == "Regression"
-    ) {
+    hyperparameters@objective <- if (type == "Regression") {
       "regression"
     } else {
       if (nclasses == 2L) {
@@ -79,6 +77,16 @@ method(train_, LightCARTHyperparameters) <- function(
   # Set n threads
   params[["num_threads"]] <- 1L
 
+  # An unset hyperparameter is NULL, and LightGBM does not treat a NULL as
+  # absent: it parses the empty value as 0 and fails its own range check
+  # (`alpha = NULL` aborts with "Check failed: (alpha) > (0.0)"). So NULL means
+  # "leave it to the backend", which is expressed by not sending it at all.
+  params <- c(
+    params,
+    lightgbm_device_params(hyperparameters, execution_config@device)
+  )
+  params <- Filter(Negate(is.null), params)
+
   model <- lightgbm::lgb.train(
     params = params,
     data = x,
@@ -88,5 +96,12 @@ method(train_, LightCARTHyperparameters) <- function(
     verbose = verbosity - 2L
   )
   check_inherits(model, "lgb.Booster")
-  list(model = model, preprocessor = prp)
+  # `hyperparameters` is returned because this method resolved values into
+  # it (R copied the caller's object, so the caller cannot see them).
+  # `train()` adopts them, and the fitted model reports what it used.
+  hyperparameters <- record_backend_values(
+    hyperparameters,
+    lightgbm_backend_values(hyperparameters, model)
+  )
+  list(model = model, preprocessor = prp, hyperparameters = hyperparameters)
 } # /rtemis::train_.LightCARTHyperparameters

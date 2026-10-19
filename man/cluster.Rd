@@ -4,7 +4,14 @@
 \alias{cluster}
 \title{Perform Clustering}
 \usage{
-cluster(x, algorithm = "KMeans", config = NULL, outdir = NULL, verbosity = 1L)
+cluster(
+  x,
+  algorithm = "KMeans",
+  config = NULL,
+  execution_config = setup_FutureExecution(),
+  outdir = NULL,
+  verbosity = 1L
+)
 }
 \arguments{
 \item{x}{Matrix, data.frame, or \code{ClusterConfig} object: Data to cluster (rows
@@ -12,12 +19,24 @@ are cases to be clustered), or a \code{ClusterConfig} recipe (from
 \link{setup_ClusterConfig}) carrying the data path, algorithm config, and output
 directory.}
 
-\item{algorithm}{Character: Clustering algorithm.}
+\item{algorithm}{Character: Clustering algorithm. Not needed when \code{config} is
+supplied, which names its own; an explicit \code{algorithm} that disagrees with
+\code{config} is an error.}
 
-\item{config}{List: Algorithm-specific config.}
+\item{config}{\code{ClusteringConfig}, optional: Algorithm-specific config from a
+clustering \verb{setup_*} function. Its \code{features} selects the columns to cluster
+on; \code{NULL} selects every numeric column of \code{x}, since a clustering backend
+reads numbers. The returned object's config carries the resolved names.}
+
+\item{execution_config}{\code{ExecutionConfig} object: Execution settings, e.g.
+\link{setup_FutureExecution} or \link{setup_SerialExecution}. A clustering dispatches
+no work to other processes and no registered algorithm threads, so the fit
+runs on one thread; the config's \code{seed} seeds it.}
 
 \item{outdir}{Character, optional: Output directory. If not NULL, the returned
-\code{Clustering} object is saved there as an \code{.rds} file.}
+\code{Clustering} object is saved there as an \code{.rds} file, alongside a run record
+(\verb{cluster_<algorithm>.record.json}) stating what the run resolved. See
+\link{write_record}.}
 
 \item{verbosity}{Integer: Verbosity level.}
 }

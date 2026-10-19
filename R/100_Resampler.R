@@ -1,0 +1,908 @@
+# 100_Resampler.R
+# ::rtemis::
+# 2025- EDG rtemis.org
+
+# References
+# https://github.com/RConsortium/S7/
+# https://rconsortium.github.io/S7
+
+# Description
+# `ResamplerConfig` class and subclasses create objects that store resampling configuration.
+# They are set by the dedicated constructors -- `setup_KFold()`,
+# `setup_StratSub()`, `setup_StratBoot()`, `setup_Bootstrap()`,
+# `setup_LOOCV()`, `setup_Custom()` -- which perform type checking and
+# validation.
+# They are used by `resample()`.
+# `Resampler` class stores resamples and their configuration.
+# `Resampler` objects are created by `resample()`.
+
+# Note: `id_strat` is used by `resample()`, not individual resamplers
+
+# %% ResamplerConfig ----
+#' ResamplerConfig
+#'
+#' @description
+#' Superclass for resampler configuration.
+#'
+#' @field type Character: Type of resampler.
+#'
+#' @details
+#' `n_resamples` is declared per subclass, not here: for every type but LOOCV it
+#' is ordinary config with a default, while LOOCV derives it from the data
+#' (`resample()` fills it in), which makes it run state. Declaring it per leaf
+#' lets each leaf schema state its own contract.
+#'
+#' @author EDG
+#' @noRd
+ResamplerConfig <- schema_class(
+  name = "ResamplerConfig",
+  package = "rtemis",
+  abstract = TRUE,
+  properties = list(
+    type = class_character
+  ),
+  publication = SchemaPublication(
+    role = "family",
+    slug = "resampler",
+    title = "rtemis ResamplerConfig",
+    description = "Language-independent config for an rtemis resampler. Mirrors the `ResamplerConfig` object: a resampler type plus its type-specific settings. The same config drives rtemis (R), rtemis CLI/shell, and rtemislive to identical resamples.",
+    discriminator = "type",
+    discriminator_description = "Resampler type.",
+    order = 5L
+  )
+) # /rtemis::ResamplerConfig
+
+
+# %% serializable_props.ResamplerConfig ----
+# A resampler serializes its type-specific settings as siblings of `type`, as
+# every family does. `id_strat` is written like any other input: it decides
+# which cases stay together, so a config that dropped it would resample
+# differently on re-read. `n_resamples` is declared per subclass and arrives
+# through `config_prop_values()` -- which drops LOOCV's, that being state the
+# data determine.
+method(serializable_props, ResamplerConfig) <- function(x) {
+  dispatched_props(x, ResamplerConfig, "type")
+} # /rtemis::serializable_props.ResamplerConfig
+
+
+# %% `$`.ResamplerConfig ----
+# Make S7 properties `$`-accessible
+method(`$`, ResamplerConfig) <- function(x, name) {
+  prop(x, name)
+}
+
+
+# %% `[[`.ResamplerConfig ----
+# Make S7 properties `[[`-accessible
+method(`[[`, ResamplerConfig) <- function(x, name) {
+  prop(x, name)
+}
+
+
+# %% repr.ResamplerConfig ----
+#' repr ResamplerConfig
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+method(repr, ResamplerConfig) <- function(x, pad = 0L, output_type = NULL) {
+  paste0(
+    repr_S7name(x, pad = pad, output_type = output_type),
+    repr_ls(
+      props(x)[-1],
+      pad = pad,
+      print_class = FALSE,
+      output_type = output_type
+    )
+  )
+} # /rtemis::repr.ResamplerConfig
+
+
+# %% print.ResamplerConfig ----
+#' Print ResamplerConfig
+#'
+#' @description
+#' print ResamplerConfig object
+#'
+#' @param x ResamplerConfig object
+#'
+#' @author EDG
+#' @noRd
+method(print, ResamplerConfig) <- function(
+  x,
+  pad = 0L,
+  output_type = NULL,
+  ...
+) {
+  cat(repr(x, pad = pad, output_type = output_type))
+  invisible(x)
+} # /rtemis::print.ResamplerConfig
+
+
+# %% desc.ResamplerConfig ----
+method(desc, ResamplerConfig) <- function(x) {
+  switch(
+    x@type,
+    KFold = paste0(x@n_resamples, " independent folds"),
+    StratSub = paste0(x@n_resamples, " stratified subsamples"),
+    StratBoot = paste0(x@n_resamples, " stratified bootstraps"),
+    Bootstrap = paste0(x@n_resamples, " bootstrap resamples"),
+    Custom = paste0(x@n_resamples, " custom resamples"),
+    LOOCV = paste0(x@n_resamples, " leave-one-out folds"),
+    paste0(x@n_resamples, " resamples")
+  )
+} # /rtemis::desc.ResamplerConfig
+
+
+# %% KFoldConfig ----
+#' @title KFoldConfig
+#'
+#' @description
+#' ResamplerConfig subclass for k-fold resampling.
+#'
+#' @author EDG
+#' @noRd
+KFoldConfig <- schema_class(
+  name = "KFoldConfig",
+  parent = ResamplerConfig,
+  properties = list(
+    type = prop_algorithm("KFold"),
+    n_resamples = prop_integer(
+      10L,
+      min = 1L,
+      description = "Number of resamples."
+    ),
+    stratify_var = prop_string(
+      NULL,
+      nullable = TRUE,
+      description = "Name of the variable to stratify by."
+    ),
+    strat_n_bins = prop_integer(
+      4L,
+      min = 1L,
+      description = "Number of bins to stratify a continuous variable into."
+    ),
+    id_strat = prop_string(
+      NULL,
+      nullable = TRUE,
+      description = "Name of the column holding per-case grouping IDs; cases sharing an ID stay in the same resample."
+    ),
+    seed = prop_integer(
+      NULL,
+      min = 0L,
+      nullable = TRUE,
+      description = "Random seed."
+    )
+  ),
+  publication = SchemaPublication(
+    role = "leaf",
+    description = "K-fold cross-validation.",
+    order = 1L
+  )
+) # /rtemis::KFoldConfig
+
+
+# %% StratSubConfig ----
+#' @title StratSubConfig
+#'
+#' @description
+#' ResamplerConfig subclass for stratified subsampling.
+#'
+#' @author EDG
+#' @noRd
+StratSubConfig <- schema_class(
+  name = "StratSubConfig",
+  parent = ResamplerConfig,
+  properties = list(
+    type = prop_algorithm("StratSub"),
+    n_resamples = prop_integer(
+      10L,
+      min = 1L,
+      description = "Number of resamples."
+    ),
+    train_p = prop_float(
+      0.75,
+      exclusive_min = 0,
+      exclusive_max = 1,
+      description = "Training set fraction."
+    ),
+    stratify_var = prop_string(
+      NULL,
+      nullable = TRUE,
+      description = "Name of the variable to stratify by."
+    ),
+    strat_n_bins = prop_integer(
+      4L,
+      min = 1L,
+      description = "Number of bins to stratify a continuous variable into."
+    ),
+    id_strat = prop_string(
+      NULL,
+      nullable = TRUE,
+      description = "Name of the column holding per-case grouping IDs; cases sharing an ID stay in the same resample."
+    ),
+    seed = prop_integer(
+      NULL,
+      min = 0L,
+      nullable = TRUE,
+      description = "Random seed."
+    )
+  ),
+  publication = SchemaPublication(
+    role = "leaf",
+    description = "Stratified subsampling.",
+    order = 2L
+  )
+) # /rtemis::StratSubConfig
+
+
+# %% StratBootConfig ----
+#' @title StratBootConfig
+#'
+#' @description
+#' ResamplerConfig subclass for stratified bootstrapping.
+#'
+#' @author EDG
+#' @noRd
+StratBootConfig <- schema_class(
+  name = "StratBootConfig",
+  parent = ResamplerConfig,
+  properties = list(
+    type = prop_algorithm("StratBoot"),
+    n_resamples = prop_integer(
+      10L,
+      min = 1L,
+      description = "Number of resamples."
+    ),
+    stratify_var = prop_string(
+      NULL,
+      nullable = TRUE,
+      description = "Name of the variable to stratify by."
+    ),
+    train_p = prop_float(
+      0.75,
+      exclusive_min = 0,
+      exclusive_max = 1,
+      description = "Training set fraction."
+    ),
+    strat_n_bins = prop_integer(
+      4L,
+      min = 1L,
+      description = "Number of bins to stratify a continuous variable into."
+    ),
+    target_length = prop_integer(
+      NULL,
+      min = 1L,
+      nullable = TRUE,
+      description = "Target length for stratified bootstraps."
+    ),
+    id_strat = prop_string(
+      NULL,
+      nullable = TRUE,
+      description = "Name of the column holding per-case grouping IDs; cases sharing an ID stay in the same resample."
+    ),
+    seed = prop_integer(
+      NULL,
+      min = 0L,
+      nullable = TRUE,
+      description = "Random seed."
+    )
+  ),
+  publication = SchemaPublication(
+    role = "leaf",
+    description = "Stratified bootstrap.",
+    order = 3L
+  )
+) # /rtemis::StratBootConfig
+
+
+# %% BootstrapConfig ----
+#' @title BootstrapConfig
+#'
+#' @description
+#' ResamplerConfig subclass for bootstrap resampling.
+#'
+#' @author EDG
+#' @noRd
+BootstrapConfig <- schema_class(
+  name = "BootstrapConfig",
+  parent = ResamplerConfig,
+  properties = list(
+    type = prop_algorithm("Bootstrap"),
+    n_resamples = prop_integer(
+      10L,
+      min = 1L,
+      description = "Number of resamples."
+    ),
+    id_strat = prop_string(
+      NULL,
+      nullable = TRUE,
+      description = "Name of the column holding per-case grouping IDs; cases sharing an ID stay in the same resample."
+    ),
+    seed = prop_integer(
+      NULL,
+      min = 0L,
+      nullable = TRUE,
+      description = "Random seed."
+    )
+  ),
+  publication = SchemaPublication(
+    role = "leaf",
+    description = "Bootstrap resampling.",
+    order = 4L
+  )
+) # /rtemis::BootstrapConfig
+
+
+# %% LOOCVConfig ----
+#' @title LOOCVConfig
+#'
+#' @description
+#' ResamplerConfig subclass for leave-one-out cross-validation.
+#'
+#' @author EDG
+#' @noRd
+LOOCVConfig <- schema_class(
+  name = "LOOCVConfig",
+  parent = ResamplerConfig,
+  properties = list(
+    type = prop_algorithm("LOOCV"),
+    # One resample per case, so only the data can say how many: `resample()`
+    # writes it, so it is run state.
+    n_resamples = prop_state(prop_integer(
+      NULL,
+      min = 1L,
+      nullable = TRUE,
+      description = "Number of resamples, one per case; set from the data."
+    ))
+  ),
+  publication = SchemaPublication(
+    role = "leaf",
+    description = "Leave-one-out cross-validation.",
+    order = 5L
+  )
+) # /rtemis::LOOCVConfig
+
+
+# %% CustomConfig ----
+#' @title CustomConfig
+#'
+#' @description
+#' ResamplerConfig subclass for custom resampling.
+#'
+#' @author EDG
+#' @noRd
+CustomConfig <- schema_class(
+  name = "CustomConfig",
+  parent = ResamplerConfig,
+  properties = list(
+    type = prop_algorithm("Custom"),
+    # Positions in one dataset in one row order, so they mean nothing away from
+    # it: the type name travels between implementations, the indices do not.
+    # `r_only` accordingly -- the saved object is their only carrier.
+    resamples = prop_r_only(prop_array(
+      items = prop_integer(1L, min = 1L, vector = TRUE),
+      nullable = TRUE,
+      description = "Training-case indices, one vector per resample."
+    )),
+    # Only the supplied resamples can say how many there are; `resample()`
+    # writes it, so it is run state.
+    n_resamples = prop_state(prop_integer(
+      NULL,
+      min = 1L,
+      nullable = TRUE,
+      description = "Number of resamples, one per supplied index vector; set from resamples."
+    ))
+  ),
+  publication = SchemaPublication(
+    role = "leaf",
+    description = "Custom, user-supplied resamples.",
+    order = 6L
+  )
+) # /rtemis::CustomConfig
+
+
+# %% repr.CustomConfig ----
+#' repr CustomConfig
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+method(repr, CustomConfig) <- function(x, pad = 0L, output_type = NULL) {
+  # The enclosing `Resampler` prints the resamples; a config repeating them
+  # prints one dataset's positions twice.
+  .props <- props(x)
+  .props[["resamples"]] <- NULL
+  paste0(
+    repr_S7name(x, pad = pad, output_type = output_type),
+    repr_ls(
+      .props[-1],
+      pad = pad,
+      print_class = FALSE,
+      output_type = output_type
+    )
+  )
+} # /rtemis::repr.CustomConfig
+
+
+# %% setup_KFold ----
+#' Setup KFold Resampler
+#'
+#' @param n_resamples Integer [1, Inf): Number of resamples to make.
+#' @param stratify_var Optional Character: Variable to stratify by.
+#' @param strat_n_bins Integer [1, Inf): Number of bins to stratify by.
+#' @param id_strat Optional Character: Name of the column holding per-case grouping IDs, e.g.
+#' subject IDs when the dataset contains repeated measurements. Cases sharing an ID stay in the
+#' same resample, so a case can only be present in the training or the test set, not both.
+#' Requires that `resample()` be given the data frame the column lives in. [train] takes the
+#' column as a case identifier, so it groups the resamples by it and excludes it from the
+#' features.
+#' @param seed Optional Integer [0, Inf): Random seed.
+#'
+#' @return `KFoldConfig` object.
+#'
+#' @author EDG
+#' @export
+#' @examples
+#' tenfold_resampler <- setup_KFold(n_resamples = 10L, seed = 2026L)
+#' tenfold_resampler
+setup_KFold <- function(
+  n_resamples = 10L,
+  stratify_var = NULL,
+  strat_n_bins = 4L,
+  id_strat = NULL,
+  seed = NULL
+) {
+  apply_setup_defaults(KFoldConfig)
+  KFoldConfig(
+    n_resamples = clean_posint(n_resamples),
+    stratify_var = stratify_var,
+    strat_n_bins = clean_posint(strat_n_bins),
+    id_strat = id_strat,
+    seed = clean_int(seed)
+  )
+} # /rtemis::setup_KFold
+
+
+# %% setup_StratSub ----
+#' Setup StratSub Resampler
+#'
+#' @param n_resamples Integer [1, Inf): Number of resamples to make.
+#' @param train_p Numeric (0, 1): Training set percentage.
+#' @param stratify_var Optional Character: Variable to stratify by.
+#' @param strat_n_bins Integer [1, Inf): Number of bins to stratify by.
+#' @param id_strat Optional Character: Name of the column holding per-case grouping IDs, e.g.
+#' subject IDs when the dataset contains repeated measurements. Cases sharing an ID stay in the
+#' same resample, so a case can only be present in the training or the test set, not both.
+#' Requires that `resample()` be given the data frame the column lives in. [train] takes the
+#' column as a case identifier, so it groups the resamples by it and excludes it from the
+#' features.
+#' @param seed Optional Integer [0, Inf): Random seed.
+#'
+#' @return `StratSubConfig` object.
+#'
+#' @author EDG
+#' @export
+#' @examples
+#' strat_sub_resampler <- setup_StratSub(n_resamples = 10L, seed = 2026L)
+#' strat_sub_resampler
+setup_StratSub <- function(
+  n_resamples = 10L,
+  train_p = .75,
+  stratify_var = NULL,
+  strat_n_bins = 4L,
+  id_strat = NULL,
+  seed = NULL
+) {
+  apply_setup_defaults(StratSubConfig)
+  StratSubConfig(
+    n_resamples = clean_posint(n_resamples),
+    train_p = train_p,
+    stratify_var = stratify_var,
+    strat_n_bins = clean_posint(strat_n_bins),
+    id_strat = id_strat,
+    seed = clean_int(seed)
+  )
+} # /rtemis::setup_StratSub
+
+
+# %% setup_StratBoot ----
+#' Setup StratBoot Resampler
+#'
+#' @param n_resamples Integer [1, Inf): Number of resamples to make.
+#' @param stratify_var Optional Character: Variable to stratify by.
+#' @param train_p Numeric (0, 1): Training set percentage.
+#' @param strat_n_bins Integer [1, Inf): Number of bins to stratify by.
+#' @param target_length Optional Integer [1, Inf): Target length for stratified bootstraps.
+#' @param id_strat Optional Character: Name of the column holding per-case grouping IDs, e.g.
+#' subject IDs when the dataset contains repeated measurements. Cases sharing an ID stay in the
+#' same resample, so a case can only be present in the training or the test set, not both.
+#' Requires that `resample()` be given the data frame the column lives in. [train] takes the
+#' column as a case identifier, so it groups the resamples by it and excludes it from the
+#' features.
+#' @param seed Optional Integer [0, Inf): Random seed.
+#'
+#' @return `StratBootConfig` object.
+#'
+#' @author EDG
+#' @export
+#' @examples
+#' strat_boot_resampler <- setup_StratBoot(n_resamples = 10L, seed = 2026L)
+#' strat_boot_resampler
+setup_StratBoot <- function(
+  n_resamples = 10L,
+  stratify_var = NULL,
+  train_p = .75,
+  strat_n_bins = 4L,
+  target_length = NULL,
+  id_strat = NULL,
+  seed = NULL
+) {
+  apply_setup_defaults(StratBootConfig)
+  StratBootConfig(
+    n_resamples = clean_posint(n_resamples),
+    stratify_var = stratify_var,
+    train_p = train_p,
+    strat_n_bins = clean_posint(strat_n_bins),
+    target_length = clean_posint(target_length),
+    id_strat = id_strat,
+    seed = clean_int(seed)
+  )
+} # /rtemis::setup_StratBoot
+
+
+# %% setup_Bootstrap ----
+#' Setup Bootstrap Resampler
+#'
+#' @param n_resamples Integer [1, Inf): Number of resamples to make.
+#' @param id_strat Optional Character: Name of the column holding per-case grouping IDs, e.g.
+#' subject IDs when the dataset contains repeated measurements. Cases sharing an ID stay in the
+#' same resample, so a case can only be present in the training or the test set, not both.
+#' Requires that `resample()` be given the data frame the column lives in. [train] takes the
+#' column as a case identifier, so it groups the resamples by it and excludes it from the
+#' features.
+#' @param seed Optional Integer [0, Inf): Random seed.
+#'
+#' @return `BootstrapConfig` object.
+#'
+#' @author EDG
+#' @export
+#' @examples
+#' bootstrap_resampler <- setup_Bootstrap(n_resamples = 10L, seed = 2026L)
+#' bootstrap_resampler
+setup_Bootstrap <- function(
+  n_resamples = 10L,
+  id_strat = NULL,
+  seed = NULL
+) {
+  apply_setup_defaults(BootstrapConfig)
+  BootstrapConfig(
+    n_resamples = clean_posint(n_resamples),
+    id_strat = id_strat,
+    seed = clean_int(seed)
+  )
+} # /rtemis::setup_Bootstrap
+
+
+# %% setup_LOOCV ----
+#' Setup LOOCV Resampler
+#'
+#' Leave-one-out cross-validation: one resample per case. `n_resamples` is not
+#' a parameter here because only the data can say how many cases there are --
+#' `resample()` fills it in.
+#'
+#' @return `LOOCVConfig` object.
+#'
+#' @author EDG
+#' @export
+#' @examples
+#' loocv_resampler <- setup_LOOCV()
+#' loocv_resampler
+setup_LOOCV <- function() {
+  apply_setup_defaults(LOOCVConfig)
+  LOOCVConfig()
+} # /rtemis::setup_LOOCV
+
+
+# %% setup_Custom ----
+#' Setup Custom Resampler
+#'
+#' @param resamples Optional List: Resamples to use, one integer vector of training-case indices
+#' per resample.
+#'
+#' @return `CustomConfig` object.
+#'
+#' @author EDG
+#' @export
+#' @examples
+#' custom_resampler <- setup_Custom(resamples = list(1:3, 2:4))
+#' custom_resampler
+setup_Custom <- function(resamples = NULL) {
+  apply_setup_defaults(CustomConfig)
+  if (is.null(resamples)) {
+    rtemis.core::abort(
+      "Custom resampling needs its resamples: supply `resamples` as a list of ",
+      "integer vectors, one per resample, each holding that resample's ",
+      "training-case indices.",
+      class = c("rtemis_value_error", "rtemis_input_error")
+    )
+  }
+  # Case indices, so positive integers, cleaned element by element:
+  # `list(c(1, 2, 3))` is how this gets written in R.
+  # `n_resamples` is left unset: `resample()` takes it from `resamples`.
+  CustomConfig(resamples = clean_posint(resamples))
+} # /rtemis::setup_Custom
+
+
+# %% setup_Resampler ----
+#' Setup a Resampler (Deprecated)
+#'
+#' `setup_Resampler()` is deprecated. Use [setup_KFold()], [setup_StratSub()],
+#' [setup_StratBoot()], [setup_Bootstrap()], [setup_LOOCV()], or [setup_Custom()].
+#' Only arguments relevant to the selected type are forwarded. Omitted arguments
+#' retain the selected setup function's default resolution.
+#'
+#' @inheritParams setup_KFold
+#' @inheritParams setup_StratSub
+#' @inheritParams setup_StratBoot
+#' @inheritParams setup_Custom
+#' @param type Character: Resampling method; matched without regard to case.
+#' @param verbosity Integer: Console verbosity. The deprecation warning is always
+#'   signaled and can be handled with `suppressWarnings()`.
+#'
+#' @details
+#' `id_strat` names a column in the input data; per-case ID vectors are not
+#' accepted. Arguments that do not apply to the selected type are ignored.
+#'
+#' @return A resampler configuration of the selected type.
+#' @aliases rtemis-deprecated
+#' @export
+#' @examples
+#' config <- suppressWarnings(setup_Resampler(5L, "KFold", seed = 2026L))
+#' config
+setup_Resampler <- function(
+  n_resamples = 10L,
+  type = c("KFold", "StratSub", "StratBoot", "Bootstrap", "LOOCV", "Custom"),
+  stratify_var = NULL,
+  train_p = .75,
+  strat_n_bins = 4L,
+  target_length = NULL,
+  id_strat = NULL,
+  seed = NULL,
+  verbosity = 1L,
+  resamples = NULL
+) {
+  type <- match_arg(
+    type,
+    c("KFold", "StratSub", "StratBoot", "Bootstrap", "LOOCV", "Custom")
+  )
+  rtemis.core::check_integer_scalar(verbosity)
+  replacement <- paste0("setup_", type)
+  base::.Deprecated(
+    new = replacement,
+    package = "rtemis",
+    old = "setup_Resampler"
+  )
+  setup <- switch(
+    type,
+    KFold = setup_KFold,
+    StratSub = setup_StratSub,
+    StratBoot = setup_StratBoot,
+    Bootstrap = setup_Bootstrap,
+    LOOCV = setup_LOOCV,
+    Custom = setup_Custom
+  )
+  supplied <- names(as.list(match.call())[-1L])
+  forwarded <- as.character(intersect(supplied, names(formals(setup))))
+  args <- mget(forwarded, envir = environment(), inherits = FALSE)
+  do.call(setup, args)
+} # /rtemis::setup_Resampler
+
+
+# %% Resampler ----
+#' Resampler
+#'
+#' @description
+#' Class for resampling objects.
+#'
+#' @field type Character: Resampling method used to draw the splits.
+#' @field resamples Named list: One-based training-row positions by split name; repeated positions retain bootstrap multiplicity.
+#' @field config ResamplerConfig: Settings used to draw the resamples.
+#'
+#' @author EDG
+#' @noRd
+Resampler <- schema_class(
+  name = "Resampler",
+  package = "rtemis",
+  properties = list(
+    type = prop_string(
+      description = "Resampling method used to draw the splits."
+    ),
+    resamples = prop_state(prop_map(
+      prop_external(prop_integer(min = 1L, vector = TRUE)),
+      description = "Training-row positions by resample identifier, using one-based indices. Repeated positions preserve bootstrap multiplicity."
+    )),
+    config = prop_schema_choice(
+      prop_object(
+        ResamplerConfig,
+        description = "Settings used to draw the resamples."
+      ),
+      additional_schemas = list(
+        `rtemis-ml::ResamplerConfig` = "https://schema.rtemis.org/resampler/python/v1/schema.json"
+      )
+    )
+  ),
+  publication = SchemaPublication(
+    kind = "report",
+    scope = "shared",
+    slug = "resamplerresult",
+    description = "Observed resampling splits and the settings used to draw them."
+  )
+) # /rtemis::Resampler
+
+
+# %% repr.Resampler ----
+#' repr Resampler
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+method(repr, Resampler) <- function(x, pad = 0L, output_type = NULL) {
+  paste0(
+    repr_S7name(x, pad = pad, output_type = output_type),
+    repr_ls(
+      props(x),
+      pad = pad,
+      print_class = FALSE,
+      output_type = output_type
+    )
+  )
+} # /rtemis::repr.Resampler
+
+
+# %% print.Resampler ----
+method(print, Resampler) <- function(
+  x,
+  output_type = NULL,
+  ...
+) {
+  cat(repr(x, output_type = output_type))
+  invisible(x)
+}
+
+# %% names.Resampler ----
+method(names, Resampler) <- function(x) {
+  names(x@resamples)
+}
+
+
+# %% `$`.Resampler ----
+# Access Resampler$resamples resamples using `$` ----
+method(`$`, Resampler) <- function(x, name) {
+  x@resamples[[name]]
+}
+
+
+# %% `.DollarNames`.Resampler ----
+# DollarSign tab-complete Resampler@resamples names
+method(`.DollarNames`, Resampler) <- function(x, pattern = "") {
+  all_names <- names(x@resamples)
+  grep(pattern, all_names, value = TRUE)
+}
+
+
+# %% `[[`.Resampler ----
+# Access Resampler$resamples resamples using `[[` ----
+method(`[[`, Resampler) <- function(x, index) {
+  x@resamples[[index]]
+}
+
+
+# %% desc.Resampler ----
+method(desc, Resampler) <- function(x) {
+  desc(x@config)
+}
+
+
+# %% --- Internal functions ----
+
+# %% .list_to_ResamplerConfig ----
+#' Convert a list to a ResamplerConfig object
+#'
+#' Internal function used by `rtemis.server` and `SuperConfig` deserialization
+#' to reconstruct a `ResamplerConfig` object from a named list. Not intended
+#' for direct use by end users.
+#'
+#' @param x Named list with the following elements:
+#'   \describe{
+#'     \item{`type`}{Character: resampler type -- one of `"KFold"`,
+#'       `"StratSub"`, `"StratBoot"`, `"Bootstrap"`, `"LOOCV"`. `"Custom"` has
+#'       no wire form and is rejected here.}
+#'     \item{`n`}{Integer: number of resamples (not used for `"LOOCV"`).}
+#'     \item{`train_p`}{Numeric: training proportion (used by `"StratSub"` and
+#'       `"StratBoot"`).}
+#'     \item{`stratify_var`}{Character or `NULL`: stratification variable name.}
+#'     \item{`strat_n_bins`}{Integer: number of bins for stratification.}
+#'     \item{`target_length`}{Integer or `NULL`: target resample length
+#'       (`"StratBoot"` only).}
+#'     \item{`id_strat`}{Character or `NULL`: name of the grouping-ID column.}
+#'     \item{`seed`}{Integer or `NULL`: random seed.}
+#'   }
+#'
+#' @return A `ResamplerConfig` object of the appropriate subtype.
+#'
+#' @author EDG
+#' @keywords internal
+#' @export
+#' @examples
+#' .list_to_ResamplerConfig(list(type = "KFold", n_resamples = 5L))
+.list_to_ResamplerConfig <- function(x) {
+  n_resamples <- x[["n_resamples"]]
+  # Drop absent (NULL) elements so class defaults apply for non-nullable
+  # properties such as `strat_n_bins` and `train_p`.
+  args <- switch(
+    x[["type"]],
+    KFold = list(
+      constructor = KFoldConfig,
+      n_resamples = n_resamples,
+      stratify_var = x[["stratify_var"]],
+      strat_n_bins = x[["strat_n_bins"]],
+      id_strat = x[["id_strat"]],
+      seed = x[["seed"]]
+    ),
+    StratSub = list(
+      constructor = StratSubConfig,
+      n_resamples = n_resamples,
+      train_p = x[["train_p"]],
+      stratify_var = x[["stratify_var"]],
+      strat_n_bins = x[["strat_n_bins"]],
+      id_strat = x[["id_strat"]],
+      seed = x[["seed"]]
+    ),
+    StratBoot = list(
+      constructor = StratBootConfig,
+      n_resamples = n_resamples,
+      train_p = x[["train_p"]],
+      stratify_var = x[["stratify_var"]],
+      strat_n_bins = x[["strat_n_bins"]],
+      target_length = x[["target_length"]],
+      id_strat = x[["id_strat"]],
+      seed = x[["seed"]]
+    ),
+    Bootstrap = list(
+      constructor = BootstrapConfig,
+      n_resamples = n_resamples,
+      id_strat = x[["id_strat"]],
+      seed = x[["seed"]]
+    ),
+    # LOOCV `n_resamples` is unset until `resample()` sees the data.
+    LOOCV = list(
+      constructor = LOOCVConfig
+    ),
+    # Custom resamples are positions in one dataset, so they have no wire form
+    # and a document naming the type carries nothing that could run. It stays a
+    # published *record* value -- a run may assert it resampled that way -- but
+    # it is not a request anything can act on.
+    Custom = rtemis.core::abort(
+      "Custom resampling cannot be read from a config: its resamples are ",
+      "positions in one dataset and have no wire form. Build it in R with ",
+      "setup_Custom(resamples = ...).",
+      class = c("rtemis_unsupported_error", "rtemis_input_error")
+    ),
+    rtemis.core::abort(
+      "Unsupported resampler type:",
+      x[["type"]],
+      class = c("rtemis_value_error", "rtemis_input_error")
+    )
+  )
+  constructor <- args[["constructor"]]
+  args[["constructor"]] <- NULL
+  # The variant is chosen, so its own properties are exactly what it accepts:
+  # `train_p` on a KFold is named in the error.
+  check_wire_keys(
+    x,
+    names(constructor@properties),
+    paste(x[["type"]], "resampler")
+  )
+  do.call(constructor, Filter(Negate(is.null), args))
+} # /rtemis::.list_to_ResamplerConfig

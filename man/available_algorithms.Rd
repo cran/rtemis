@@ -4,6 +4,7 @@
 \alias{available_supervised}
 \alias{available_algorithms}
 \alias{available_clustering}
+\alias{available_calibration}
 \alias{available_decomposition}
 \title{Available Algorithms}
 \usage{
@@ -11,10 +12,16 @@ available_supervised(verbosity = 1L)
 
 available_clustering(verbosity = 1L)
 
-available_decomposition(verbosity = 1L)
+available_calibration(verbosity = 1L)
+
+available_decomposition(verbosity = 1L, traits = FALSE)
 }
 \arguments{
 \item{verbosity}{Integer: Verbosity level.}
+
+\item{traits}{Logical: If TRUE, \code{available_decomposition()} prints and
+returns the full trait table from \link{decomposition_traits} instead of the
+named list of descriptions.}
 }
 \value{
 Named list of algorithm descriptions, invisibly.
@@ -22,10 +29,21 @@ Named list of algorithm descriptions, invisibly.
 \description{
 Print available algorithms for supervised learning, clustering, and decomposition.
 }
+\details{
+Each algorithm is set up with \verb{setup_\{Algorithm\}()}, using the name printed
+here: \code{setup_LightGBM()}, \code{setup_KMeans()}, \code{setup_PCA()}. Pass the result to
+\link{train}, \link{cluster}, or \link{decomp}.
+}
 \examples{
 available_supervised()
+# Train with one of them, at its default hyperparameters:
+# train(iris, hyperparameters = setup_LightGBM())
 available_clustering()
+available_calibration()
+# Calibrate with one of them:
+# calibrate(mod, hyperparameters = setup_Isotonic())
 available_decomposition()
+available_decomposition(traits = TRUE)
 }
 \author{
 EDG

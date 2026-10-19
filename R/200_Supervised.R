@@ -1,0 +1,4113 @@
+# 200_Supervised.R
+# ::rtemis::
+# 2025- EDG rtemis.org
+
+# References
+# https://github.com/RConsortium/S7/
+# https://rconsortium.github.io/S7
+# https://rconsortium.github.io/S7/articles/classes-objects.html?q=computed#computed-properties
+# https://utf8-icons.com/
+
+# %% IMPORTANCE_KINDS ----
+# What an importance measure quantifies:
+# - "split_gain"                loss or impurity reduction from splits on the
+#                               predictor
+# - "corrected_split_gain"      split gain corrected for the bias of impurity
+#                               measures by permuted pseudo-predictors
+# - "split_frequency"           share or count of splits using the predictor
+# - "split_cover"               cases reaching splits on the predictor
+# - "permutation"               increase in prediction error when the
+#                               predictor's values are permuted
+# - "coefficient"               a model coefficient
+# - "standardized_coefficient"  a coefficient times the predictor's standard
+#                               deviation
+# - "coefficient_magnitude"     absolute coefficients of the terms involving
+#                               the predictor, combined
+# - "partial_effect_variance"   variance of the predictor's term over cases
+# - "model_selection"           contribution to a model-selection criterion
+# - "contribution"              mean absolute contribution to predictions
+# - "ensemble_weight"           weight of a base learner in an ensemble
+# - "cross_validated_risk"      cross-validated loss of a base learner
+# - "dispersion"                spread of another measure over draws
+IMPORTANCE_KINDS <- c(
+  "split_gain",
+  "corrected_split_gain",
+  "split_frequency",
+  "split_cover",
+  "permutation",
+  "coefficient",
+  "standardized_coefficient",
+  "coefficient_magnitude",
+  "partial_effect_variance",
+  "model_selection",
+  "contribution",
+  "ensemble_weight",
+  "cross_validated_risk",
+  "dispersion"
+)
+
+# %% IMPORTANCE_DATA ----
+# The cases a measure is computed on.
+IMPORTANCE_DATA <- c(
+  "training",
+  "out_of_bag",
+  "held_out",
+  "cross_validation",
+  "explained_cases"
+)
+
+# %% IMPORTANCE_DIRECTIONS ----
+# How a measure ranks predictors: by larger values, by larger absolute
+# values, by smaller values, or not at all (a spread or a value without an
+# ordering by importance).
+IMPORTANCE_DIRECTIONS <- c("larger", "absolute", "smaller", "none")
+
+
+# %% ImportanceMeasure ----
+#' ImportanceMeasure
+#'
+#' @description
+#' One variable importance measure: what it quantifies and how to read it,
+#' and its value for each predictor or model term.
+#'
+#' @field kind Character \{"split_gain", "corrected_split_gain", "split_frequency", "split_cover", "permutation", "coefficient", "standardized_coefficient", "coefficient_magnitude", "partial_effect_variance", "model_selection", "contribution", "ensemble_weight", "cross_validated_risk", "dispersion"\}:
+#'   What the measure quantifies.
+#' @field computed_on Character \{"training", "out_of_bag", "held_out", "cross_validation", "explained_cases"\}:
+#'   The cases the measure is computed on.
+#' @field signed Logical: Whether values can be negative.
+#' @field scale_dependent Logical: Whether values depend on the units of the
+#'   predictors, so that magnitudes are comparable only across predictors on a
+#'   common scale.
+#' @field direction Character \{"larger", "absolute", "smaller", "none"\}: How
+#'   the measure ranks predictors.
+#' @field description Character: What the values are, for this model.
+#' @field values Named vector: The value for each predictor, model term, or
+#'   base learner, keyed by its name.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+ImportanceMeasure <- schema_class(
+  name = "ImportanceMeasure",
+  package = "rtemis",
+  properties = list(
+    kind = prop_string(
+      IMPORTANCE_KINDS[[1L]],
+      enum = IMPORTANCE_KINDS,
+      description = "What the measure quantifies: 'split_gain' loss or impurity reduction from splits on the predictor; 'corrected_split_gain' split gain corrected by permuted pseudo-predictors; 'split_frequency' share or count of splits using the predictor; 'split_cover' cases reaching splits on the predictor; 'permutation' increase in prediction error when the predictor is permuted; 'coefficient' a model coefficient; 'standardized_coefficient' a coefficient times the predictor's standard deviation; 'coefficient_magnitude' absolute coefficients of the terms involving the predictor, combined; 'partial_effect_variance' variance of the predictor's term over cases; 'model_selection' contribution to a model-selection criterion; 'contribution' mean absolute contribution to predictions; 'ensemble_weight' weight of a base learner in an ensemble; 'cross_validated_risk' cross-validated loss of a base learner; 'dispersion' spread of another measure over draws."
+    ),
+    computed_on = prop_string(
+      IMPORTANCE_DATA[[1L]],
+      enum = IMPORTANCE_DATA,
+      description = "The cases the measure is computed on: the training cases, the out-of-bag cases of each tree, cases held out from fitting, cross-validated predictions, or the cases an explanation was computed for."
+    ),
+    signed = prop_boolean(
+      FALSE,
+      description = "Whether values can be negative."
+    ),
+    scale_dependent = prop_boolean(
+      FALSE,
+      description = "Whether values depend on the units of the predictors, so that magnitudes are comparable only across predictors on a common scale."
+    ),
+    direction = prop_string(
+      IMPORTANCE_DIRECTIONS[[1L]],
+      enum = IMPORTANCE_DIRECTIONS,
+      description = "How the measure ranks predictors: 'larger' by larger values, 'absolute' by larger absolute values, 'smaller' by smaller values, 'none' it does not rank them."
+    ),
+    description = prop_string(
+      "",
+      description = "What the values are, for this model."
+    ),
+    values = prop_map(
+      prop_float(
+        NULL,
+        nullable = TRUE,
+        description = "Value of the measure; null when unavailable or not finite."
+      ),
+      description = "Value of the measure for each predictor, model term, or base learner, keyed by its name."
+    )
+  ),
+  publication = SchemaPublication(
+    role = "document",
+    slug = "importancemeasure",
+    title = "rtemis ImportanceMeasure",
+    description = "One variable importance measure of a fitted model: what it quantifies, the cases it is computed on, whether it is signed or depends on predictor units, how it ranks predictors, and its value for each predictor or model term.",
+    order = 34L,
+    kind = "report",
+    scope = "shared"
+  )
+) # /rtemis::ImportanceMeasure
+
+
+# %% .list_to_ImportanceMeasure ----
+#' Decode an importance measure from its wire form
+#' @param value Named list: Parsed measure.
+#' @return `ImportanceMeasure` object.
+#' @keywords internal
+#' @noRd
+.list_to_ImportanceMeasure <- function(value) {
+  value[["$schema"]] <- NULL
+  do.call(ImportanceMeasure, from_wire(value, ImportanceMeasure))
+} # /rtemis::.list_to_ImportanceMeasure
+
+
+# %% importance_measure ----
+#' Build an `ImportanceMeasure`
+#'
+#' @param variable Character vector: Predictors, model terms, or base
+#'   learners.
+#' @param value Numeric vector: One value per entry of `variable`.
+#' @param kind Character: One of `IMPORTANCE_KINDS`.
+#' @param computed_on Character: One of `IMPORTANCE_DATA`.
+#' @param signed Logical: Whether values can be negative.
+#' @param scale_dependent Logical: Whether values depend on predictor units.
+#' @param direction Character: One of `IMPORTANCE_DIRECTIONS`.
+#' @param description Character: What the values are.
+#'
+#' @return `ImportanceMeasure` object.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+importance_measure <- function(
+  variable,
+  value,
+  kind,
+  computed_on = "training",
+  signed = FALSE,
+  scale_dependent = FALSE,
+  direction = "larger",
+  description
+) {
+  value <- as.numeric(value)
+  value[!is.finite(value)] <- NA_real_
+  ImportanceMeasure(
+    kind = kind,
+    computed_on = computed_on,
+    signed = signed,
+    scale_dependent = scale_dependent,
+    direction = direction,
+    description = description,
+    values = stats::setNames(value, as.character(variable))
+  )
+} # /rtemis::importance_measure
+
+
+# %% VariableImportance ----
+#' VariableImportance
+#'
+#' @description
+#' The variable importance measures of a fitted model, keyed by name. Each
+#' measure carries what it quantifies and its value for each predictor or
+#' model term.
+#'
+#' @field measures Named list of `ImportanceMeasure` objects.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+VariableImportance <- schema_class(
+  name = "VariableImportance",
+  package = "rtemis",
+  properties = list(
+    measures = prop_collection(
+      ImportanceMeasure,
+      container = "map",
+      min_items = 1L,
+      description = "Importance measures, keyed by measure name."
+    )
+  ),
+  publication = SchemaPublication(
+    kind = "report",
+    scope = "shared",
+    description = "Variable importance measures of a fitted model, keyed by name, each with what it quantifies and its value for each predictor or model term."
+  )
+) # /rtemis::VariableImportance
+
+
+# %% VARIMP_TABLE_RESERVED ----
+# Column names a wide importance table uses for structure.
+VARIMP_TABLE_RESERVED <- c("variable", "fold")
+
+
+# %% varimp_column_names ----
+#' Column names for importance measures in a wide table
+#'
+#' A measure keeps its name unless it is a structural column name or repeats
+#' an earlier column, in which case " (measure)" is appended, and then a
+#' number, until it is distinct.
+#'
+#' @param measures Character: Measure names.
+#'
+#' @return Character, named by measure name.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+varimp_column_names <- function(measures) {
+  taken <- VARIMP_TABLE_RESERVED
+  columns <- vapply(
+    measures,
+    function(nm) {
+      column <- nm
+      if (column %in% taken) {
+        column <- paste0(nm, " (measure)")
+      }
+      i <- 2L
+      while (column %in% taken) {
+        column <- paste0(nm, " (measure ", i, ")")
+        i <- i + 1L
+      }
+      taken <<- c(taken, column)
+      column
+    },
+    character(1L)
+  )
+  stats::setNames(columns, measures)
+} # /rtemis::varimp_column_names
+
+
+# %% varimp_table ----
+#' Variable importance as one table
+#'
+#' @description
+#' Combine the variable importance measures of a model into one table: one
+#' row per predictor or model term and one column per measure.
+#'
+#' @details
+#' Columns follow the order of the measures. A predictor a measure does not
+#' cover is `NA` in that measure's column: some backends report only the
+#' predictors used in a split. A measure named `variable` or `fold`, or one
+#' repeating an earlier column, is labeled "`<name> (measure)`", since those
+#' column names carry the table's structure.
+#'
+#' The table holds the values only. What each measure quantifies, the cases it
+#' was computed on, and how it ranks predictors are on the measure itself:
+#' `get_varimp(model)@measures[["<name>"]]`.
+#'
+#' @param x `VariableImportance` object, as returned by [get_varimp].
+#'
+#' @return data.frame with a `variable` column and one numeric column per
+#'   measure.
+#'
+#' @author EDG
+#' @export
+#'
+#' @examples
+#' mod <- train(iris, hyperparameters = setup_CART(), verbosity = 0L)
+#' varimp_table(get_varimp(mod))
+varimp_table <- function(x) {
+  check_is_S7(x, VariableImportance)
+  measures <- x@measures
+  variables <- unique(unlist(lapply(measures, function(m) names(m@values))))
+  columns <- varimp_column_names(names(measures))
+  out <- data.frame(variable = variables)
+  for (nm in names(measures)) {
+    values <- measures[[nm]]@values
+    out[[columns[[nm]]]] <- unname(values[variables])
+  }
+  out
+} # /rtemis::varimp_table
+
+
+# %% repr.VariableImportance ----
+method(repr, VariableImportance) <- function(x, pad = 0L, output_type = NULL) {
+  indent <- strrep(" ", pad + 2L)
+  out <- repr_S7name("VariableImportance", pad = pad, output_type = output_type)
+  for (nm in names(x@measures)) {
+    m <- x@measures[[nm]]
+    out <- paste0(
+      out,
+      indent,
+      fmt(nm, col = highlight_col, bold = TRUE, output_type = output_type),
+      " (",
+      m@kind,
+      ", ",
+      length(m@values),
+      ngettext(length(m@values), " entry", " entries"),
+      "): ",
+      m@description,
+      "\n"
+    )
+  }
+  out
+} # /rtemis::repr.VariableImportance
+
+
+# %% print.VariableImportance ----
+method(print, VariableImportance) <- function(x, output_type = NULL, ...) {
+  cat(repr(x, output_type = output_type))
+  invisible(x)
+} # /rtemis::print.VariableImportance
+
+
+# Plot methods
+# Supervised: plot_varimp
+# SupervisedRes: plot_varimp, plot_metric
+# Regression: plot_true_pred,
+# Classification: plot_true_pred, plot_roc
+# RegressionRes: plot_metric, plot_true_pred,
+# ClassificationRes: plot_metric, plot_true_pred, plot_roc
+
+# %% SUPERVISED_TYPES ----
+# The two kinds of supervised learning rtemis performs, decided by the outcome:
+# a factor gives Classification, anything numeric gives Regression.
+SUPERVISED_TYPES <- c("Regression", "Classification")
+
+
+# %% Supervised ----
+#' Supervised
+#'
+#' @description
+#' Superclass for supervised learning models.
+#'
+#' @author EDG
+#' @noRd
+Supervised <- schema_class(
+  name = "Supervised",
+  package = "rtemis",
+  properties = list(
+    algorithm = prop_string(
+      description = "Algorithm identifier of the fitted implementation."
+    ),
+    # Native fitted state stays on the object, outside its portable wire values.
+    model = prop_runtime(
+      "Fitted model used by this implementation for prediction."
+    ),
+    # No default: the kind of learning follows from the outcome. NULL is the
+    # unset value, and a constructor that did not set it fails at first use.
+    type = prop_string(
+      NULL,
+      enum = SUPERVISED_TYPES,
+      nullable = TRUE,
+      description = "Kind of supervised learning the model performs."
+    ),
+    preprocessor = prop_runtime(
+      "Fitted preprocessing applied before feature decomposition.",
+      cls = Preprocessor
+    ),
+    preprocessor_internal = prop_runtime(
+      "Fitted algorithm-specific preprocessing applied before prediction.",
+      cls = Preprocessor
+    ),
+    decomposition = prop_runtime(
+      "Fitted feature decomposition applied before algorithm-specific preprocessing.",
+      cls = Decomposition
+    ),
+    hyperparameters = prop_schema_choice(
+      prop_object(
+        Hyperparameters,
+        nullable = TRUE,
+        description = "Algorithm settings used by the fitted model; the run record carries complete resolution details."
+      ),
+      additional_schemas = list(
+        `rtemis-ml::Hyperparameters` = "https://schema.rtemis.org/hyperparameters/python/v1/schema.json"
+      )
+    ),
+    tuner = prop_runtime(
+      "Native tuning results; portable tuning details are carried by the run record.",
+      cls = Tuner
+    ),
+    execution_config = prop_schema_choice(
+      prop_object(
+        ExecutionConfig,
+        description = "Execution settings used by this implementation."
+      ),
+      additional_schemas = list(
+        `rtemis-ml::ExecutionConfig` = "https://schema.rtemis.org/execution/python/v1/schema.json"
+      )
+    ),
+    # The outcome, in the same shape as the predictions it is compared against:
+    # numeric for regression, a factor of its levels for classification.
+    y_training = prop_state(prop_union(
+      list(
+        prop_external(prop_array(prop_float(NULL, nullable = TRUE))),
+        prop_external(prop_factor(allow_missing = TRUE))
+      ),
+      nullable = FALSE,
+      description = "Observed outcomes for the training sample, in row order. Numeric values or categorical levels and codes; unavailable values are null."
+    )),
+    y_validation = prop_state(prop_union(
+      list(
+        prop_external(prop_array(prop_float(NULL, nullable = TRUE))),
+        prop_external(prop_factor(allow_missing = TRUE))
+      ),
+      nullable = TRUE,
+      description = "Observed outcomes for the validation sample, in row order. Numeric values or categorical levels and codes; unavailable values are null."
+    )),
+    y_test = prop_state(prop_union(
+      list(
+        prop_external(prop_array(prop_float(NULL, nullable = TRUE))),
+        prop_external(prop_factor(allow_missing = TRUE))
+      ),
+      nullable = TRUE,
+      description = "Observed outcomes for the test sample, in row order. Numeric values or categorical levels and codes; unavailable values are null."
+    )),
+    # Regression predicts numeric, classification predicts a factor of the
+    # outcome's levels; there is no third case.
+    predicted_training = prop_state(prop_union(
+      list(
+        prop_external(prop_array(prop_float(NULL, nullable = TRUE))),
+        prop_external(prop_factor(allow_missing = TRUE))
+      ),
+      nullable = FALSE,
+      description = "Predictions for the training sample, in row order. Numeric values or categorical levels and codes; unavailable values are null."
+    )),
+    predicted_validation = prop_state(prop_union(
+      list(
+        prop_external(prop_array(prop_float(NULL, nullable = TRUE))),
+        prop_external(prop_factor(allow_missing = TRUE))
+      ),
+      nullable = TRUE,
+      description = "Predictions for the validation sample, in row order. Numeric values or categorical levels and codes; unavailable values are null."
+    )),
+    predicted_test = prop_state(prop_union(
+      list(
+        prop_external(prop_array(prop_float(NULL, nullable = TRUE))),
+        prop_external(prop_factor(allow_missing = TRUE))
+      ),
+      nullable = TRUE,
+      description = "Predictions for the test sample, in row order. Numeric values or categorical levels and codes; unavailable values are null."
+    )),
+    metrics_training = prop_state(prop_union(
+      list(prop_object(RegressionMetrics), prop_object(ClassificationMetrics)),
+      nullable = FALSE,
+      description = "Metrics for the training sample."
+    )),
+    metrics_validation = prop_state(prop_union(
+      list(prop_object(RegressionMetrics), prop_object(ClassificationMetrics)),
+      nullable = TRUE,
+      description = "Metrics for the validation sample."
+    )),
+    metrics_test = prop_state(prop_union(
+      list(prop_object(RegressionMetrics), prop_object(ClassificationMetrics)),
+      nullable = TRUE,
+      description = "Metrics for the test sample."
+    )),
+    xnames = prop_string(
+      vector = TRUE,
+      description = "Predictor names in the order expected by the fitted model."
+    ),
+    varimp = prop_object(
+      VariableImportance,
+      nullable = TRUE,
+      description = "Variable importance measures from the fitted model."
+    ),
+    question = prop_string(
+      NULL,
+      nullable = TRUE,
+      description = "Question addressed by this analysis."
+    ),
+    # Provenance. `session_info` is a full `utils::sessionInfo()` -- the first
+    # thing asked for when troubleshooting -- and `session` is the run timeline.
+    # `data_fingerprint` identifies the training data itself, so that comparing
+    # models trained on different inputs is detectable.
+    data_fingerprint = prop_object(
+      DataFingerprint,
+      nullable = TRUE,
+      description = "Fingerprint of the training data."
+    ),
+    # R-specific by construction, and what a consumer outside R would want
+    # from it -- versions, platform -- is what `Provenance` publishes.
+    session_info = prop_r_only(new_property(class_any)),
+    session = prop_runtime(
+      "Native execution session; portable history is carried by the session artifact.",
+      cls = SupervisedSession
+    ),
+    # The run's *input*, which nothing else here carries: the hyperparameters on
+    # this object are the ones that ran, resolved, and only the input says what
+    # was asked for. `record()` needs both to state where each value came from.
+    # Assigned by `train()` after construction.
+    config = prop_runtime(
+      "Native input configuration, which may contain in-memory data; portable settings are carried by the run record.",
+      cls = SuperConfig
+    )
+  ),
+  publication = SchemaPublication(
+    kind = "report",
+    scope = "shared",
+    slug = "supervisedresult",
+    description = "Portable supervised learning result; native fitted state is held separately on the object."
+  ),
+  rules = c(
+    unlist(
+      lapply(
+        c(
+          "y_training",
+          "y_validation",
+          "y_test",
+          "predicted_training",
+          "predicted_validation",
+          "predicted_test",
+          "metrics_training",
+          "metrics_validation",
+          "metrics_test"
+        ),
+        function(nm) {
+          lapply(seq_along(SUPERVISED_TYPES), function(i) {
+            UnionSelectionRule(
+              id = paste0(
+                "supervised.",
+                tolower(SUPERVISED_TYPES[[i]]),
+                ".",
+                nm
+              ),
+              message = paste0(
+                nm,
+                " must use the ",
+                tolower(SUPERVISED_TYPES[[i]]),
+                " representation selected by type."
+              ),
+              property = nm,
+              alternative = i,
+              when = SchemaPredicate(
+                property = "type",
+                equals = SUPERVISED_TYPES[[i]]
+              )
+            )
+          })
+        }
+      ),
+      recursive = FALSE
+    ),
+    unlist(
+      lapply(c("training", "validation", "test"), function(sample) {
+        observed <- paste0("y_", sample)
+        predicted <- paste0("predicted_", sample)
+        c(
+          list(
+            RowCountMatches(
+              id = paste0("supervised.rows.", observed, ".", predicted),
+              left = observed,
+              right = predicted,
+              message = paste0(
+                observed,
+                " and ",
+                predicted,
+                " must have the same number of rows."
+              )
+            ),
+            FactorLevelsMatch(
+              id = paste0("supervised.levels.", predicted, ".y_training"),
+              left = predicted,
+              right = "y_training",
+              message = paste0(
+                predicted,
+                " must use the training class levels in the same order."
+              )
+            )
+          ),
+          if (sample != "training") {
+            list(FactorLevelsMatch(
+              id = paste0("supervised.levels.", observed, ".y_training"),
+              left = observed,
+              right = "y_training",
+              message = paste0(
+                observed,
+                " must use the training class levels in the same order."
+              )
+            ))
+          }
+        )
+      }),
+      recursive = FALSE
+    )
+  ),
+  constructor = function(
+    algorithm,
+    model,
+    type,
+    preprocessor,
+    preprocessor_internal,
+    decomposition = NULL,
+    hyperparameters,
+    tuner,
+    execution_config,
+    y_training,
+    y_validation,
+    y_test,
+    predicted_training,
+    predicted_validation,
+    predicted_test,
+    metrics_training,
+    metrics_validation,
+    metrics_test,
+    xnames,
+    varimp,
+    question,
+    data_fingerprint = NULL
+  ) {
+    new_object(
+      S7_object(),
+      algorithm = algorithm,
+      model = model,
+      type = type,
+      preprocessor = preprocessor,
+      preprocessor_internal = preprocessor_internal,
+      decomposition = decomposition,
+      hyperparameters = hyperparameters,
+      tuner = tuner,
+      execution_config = execution_config,
+      y_training = y_training,
+      y_validation = y_validation,
+      y_test = y_test,
+      predicted_training = predicted_training,
+      predicted_validation = predicted_validation,
+      predicted_test = predicted_test,
+      metrics_training = metrics_training,
+      metrics_validation = metrics_validation,
+      metrics_test = metrics_test,
+      xnames = xnames,
+      varimp = varimp,
+      question = question,
+      data_fingerprint = data_fingerprint,
+      session_info = session_info(),
+      session = NULL
+    )
+  }
+) # /rtemis::Supervised
+
+
+# %% supervised_features ----
+#' Put `newdata` in the shape the fitted backend was trained on
+#'
+#' Re-applies, in order, the stored user preprocessor and decomposition,
+#' enforces predictor names and order, then applies the algorithm-internal
+#' preprocessor.
+#'
+#' Extracted so that everything querying the backend goes through one
+#' definition: predictions and standard errors computed from differently
+#' transformed features would be silently mismatched.
+#'
+#' @param object `Supervised` object.
+#' @param newdata tabular data: New data.
+#' @param execution_config Optional `ExecutionConfig`: Where the stored
+#' decomposition is applied; NULL means the host's defaults.
+#' @param verbosity Integer: Verbosity level.
+#'
+#' @return `newdata`, transformed.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+supervised_features <- function(
+  object,
+  newdata,
+  execution_config = NULL,
+  verbosity = 1L
+) {
+  check_inherits(newdata, "data.frame")
+
+  # Apply user-specified preprocessor if available
+  if (!is.null(object@preprocessor)) {
+    newdata <- apply_preprocessor(
+      object@preprocessor,
+      newdata,
+      verbosity = verbosity
+    )
+  }
+
+  # Apply decomposition if available.
+  # In train(), the decomposition is learned on the (user-preprocessed) training
+  # features, so it is re-applied here after user preprocessing and before the
+  # algorithm-specific preprocessor, which was fit on the decomposed features.
+  if (!is.null(object@decomposition)) {
+    newdata <- as.data.frame(
+      apply_decomposition(
+        object@decomposition,
+        newdata,
+        execution_config = execution_config,
+        verbosity = verbosity
+      )
+    )
+  }
+
+  # Enforce strict predictor names and order.
+  # `xnames` records the features as they stood after user preprocessing and
+  # decomposition but before the algorithm-internal preprocessor, so the check
+  # runs at that same point. An internal preprocessor that widens the frame
+  # (one-hot encoding a factor) would otherwise be compared against names that
+  # predate the encoding and fail on data that is in fact correct.
+  if (!identical(names(newdata), object@xnames)) {
+    extra_cols <- setdiff(names(newdata), object@xnames)
+    missing_cols <- setdiff(object@xnames, names(newdata))
+    rtemis.core::abort(
+      "Predictor names and order in newdata must exactly match training data.\n",
+      "Expected ",
+      length(object@xnames),
+      " columns; got ",
+      NCOL(newdata),
+      ".\n",
+      if (length(extra_cols) > 0L) {
+        paste0("Unexpected columns: ", paste(extra_cols, collapse = ", "))
+      } else {
+        "Unexpected columns: none."
+      },
+      "\n",
+      if (length(missing_cols) > 0L) {
+        paste0("Missing columns: ", paste(missing_cols, collapse = ", "))
+      } else {
+        "Missing columns: none."
+      },
+      class = c("rtemis_dim_error", "rtemis_data_error")
+    )
+  }
+
+  # Apply algorithm-specific preprocessor if available
+  if (!is.null(object@preprocessor_internal)) {
+    newdata <- apply_preprocessor(
+      object@preprocessor_internal,
+      newdata,
+      verbosity = verbosity
+    )
+  }
+
+  newdata
+} # /rtemis::supervised_features
+
+
+# %% predict_supervised_ ----
+#' Run the `Supervised` prediction pipeline
+#'
+#' Transforms `newdata` with `supervised_features()`, then calls
+#' `predict_super()`. Shared by `predict.Supervised` and
+#' `predict.CalibratedClassification` (the latter cannot call its parent method
+#' directly because `predict` is an S3/base generic, not an S7 generic).
+#'
+#' @param object `Supervised` object.
+#' @param newdata tabular data: New data to predict.
+#' @param execution_config Optional `ExecutionConfig`: Where and with what the
+#' prediction runs; NULL means the host's defaults.
+#' @param verbosity Integer: Verbosity level.
+#'
+#' @return Output of `predict_super()` (raw predictions / probabilities).
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+predict_supervised_ <- function(
+  object,
+  newdata,
+  execution_config = NULL,
+  verbosity = 1L
+) {
+  # Resolved before the call, not inside it. `predict_super()` is an S7 generic
+  # with explicit formals, so its dispatch frame holds each argument as a
+  # promise; an error raised while one is being forced leaves that promise
+  # under evaluation, and any later walk of the stack that touches it (rlang's
+  # `trace_back()` does) fails with "promise already under evaluation" instead
+  # of reporting the original error.
+  features <- supervised_features(
+    object,
+    newdata,
+    execution_config = execution_config,
+    verbosity = verbosity
+  )
+  predicted <- predict_super(
+    model = object@model,
+    newdata = features,
+    type = object@type,
+    execution_config = execution_config,
+    verbosity = verbosity
+  )
+  # Classification predictions are probabilities, and each backend reduces the
+  # binary case to a bare vector in its own way. Normalized here so that
+  # `predict()` returns what `@predicted_prob_*` holds: two names for the same
+  # quantity must not have two shapes.
+  if (object@type == "Classification") {
+    predicted <- prob_matrix(
+      predicted,
+      levels(object@y_training),
+      object@binclasspos
+    )
+  }
+  predicted
+} # /rtemis::predict_supervised_
+
+
+# %% predict.Supervised ----
+#' Predict `Supervised`
+#'
+#' Predict Method for `Supervised` objects
+#'
+#' @param object `Supervised` object.
+#' @param newdata data.frame or similar: New data to predict.
+#' @param execution_config Optional `ExecutionConfig` object: Threads for a
+#' backend that threads at prediction are its `n_workers_algorithm`, or its
+#' worker count, and its `device` the compute device for a model that can move.
+#' `NULL` uses the host's default worker count and selects the device
+#' automatically -- the machine that predicts decides, not the one that trained.
+#'
+#' @noRd
+method(predict, Supervised) <- function(
+  object,
+  newdata,
+  execution_config = NULL,
+  verbosity = 1L,
+  ...
+) {
+  predict_supervised_(
+    object,
+    newdata,
+    execution_config = execution_config,
+    verbosity = verbosity
+  )
+} # /rtemis::predict.Supervised
+
+
+# %% fitted.Supervised ----
+#' Fitted `Supervised`
+#'
+#' Fitted Method for `Supervised` objects
+#'
+#' @param object `Supervised` object.
+#'
+#' @keywords internal
+#' @noRd
+method(fitted, Supervised) <- function(object, ...) {
+  object@predicted_training
+} # /rtemis::fitted.Supervised
+
+
+# %% se.Supervised ----
+#' Standard Error `Supervised`
+#'
+#' Standard errors of the fit for `newdata`, or NULL when the algorithm
+#' produces none -- only a few do, which is why this is computed here rather
+#' than stored on every regression result.
+#'
+#' Routed through the same pipeline as `predict`, so a stored preprocessor,
+#' decomposition and algorithm-internal preprocessor are re-applied before the
+#' backend is queried. Computing standard errors on raw `newdata` while
+#' predictions come from transformed features would silently pair the two.
+#'
+#' @param x `Supervised` object.
+#' @param newdata tabular data: Data to compute standard errors for.
+#' @param verbosity Integer: Verbosity level.
+#'
+#' @keywords internal
+#' @noRd
+method(se, Supervised) <- function(x, newdata, verbosity = 0L) {
+  features <- supervised_features(x, newdata, verbosity = verbosity)
+  # Only a few algorithms define `se_super()`. Anything else has no standard
+  # error, so a missing method reads as NULL.
+  tryCatch(
+    se_super(model = x@model, newdata = features),
+    S7_error_method_not_found = function(e) NULL
+  )
+}
+
+
+# %% `$`.Supervised ----
+method(`$`, Supervised) <- function(x, name) {
+  prop_by_name(x, name)
+}
+
+
+# %% `.DollarNames`.Supervised ----
+method(`.DollarNames`, Supervised) <- function(x, pattern = "") {
+  prop_names_matching(x, pattern)
+}
+
+
+# %% `[[`.Supervised ----
+method(`[[`, Supervised) <- function(x, name) {
+  prop_by_name(x, name)
+}
+
+
+# %% repr_decomposition_line ----
+#' Build the decomposition line for `repr` methods
+#'
+#' Shared by `repr.Supervised` and `repr.SupervisedRes`. Formats a single line
+#' of the form "Decomposed {n} features to {k} components using {algorithm}.".
+#'
+#' @param n_features Integer: Number of features that were decomposed.
+#' @param k Integer: Number of components produced.
+#' @param algorithm Character: Decomposition algorithm name.
+#' @param pad Integer: Left side padding.
+#' @param output_type Character {"ansi", "html", or "plain"}: Output type.
+#'
+#' @return Character: The formatted line (ending in a newline).
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+repr_decomposition_line <- function(
+  n_features,
+  k,
+  algorithm,
+  pad = 0L,
+  output_type
+) {
+  paste0(
+    fmt(
+      "\U25C8",
+      col = col_decom,
+      bold = TRUE,
+      pad = pad,
+      output_type = output_type
+    ),
+    " Decomposed ",
+    n_features,
+    " feature",
+    if (n_features != 1L) "s",
+    " to ",
+    k,
+    " component",
+    if (k != 1L) "s",
+    " using ",
+    algorithm,
+    ".\n"
+  )
+} # /rtemis::repr_decomposition_line
+
+
+# %% repr.Supervised ----
+#' repr `Supervised`
+#'
+#' @param x `Supervised` object.
+#'
+#' @author EDG
+#'
+#' @keywords internal
+#' @noRd
+method(repr, Supervised) <- function(
+  x,
+  pad = 0L,
+  output_type = NULL,
+  filename = NULL
+) {
+  output_type <- get_output_type(output_type, filename)
+  # Class name
+  out <- paste0(
+    repr_S7name(x@type, pad = pad, output_type = output_type),
+    highlight(x@algorithm, output_type = output_type),
+    " (",
+    desc_alg(x@algorithm),
+    ")\n"
+  )
+
+  # Preprocessing, if available
+  if (!is.null(x@preprocessor)) {
+    steps <- desc_preprocessor_steps(x@preprocessor@config)
+    out <- paste0(
+      out,
+      fmt(
+        "\U25A3",
+        col = col_preprocessor,
+        bold = TRUE,
+        pad = pad,
+        output_type = output_type
+      ),
+      if (length(steps) > 0L) {
+        paste0(" Preprocessed using ", paste(steps, collapse = ", "), ".\n")
+      } else {
+        " Preprocessed.\n"
+      }
+    )
+  }
+
+  # Decomposition, if available
+  if (!is.null(x@decomposition)) {
+    out <- paste0(
+      out,
+      repr_decomposition_line(
+        n_features = length(x@decomposition@config@features),
+        k = x@decomposition@config[["k"]],
+        algorithm = x@decomposition@algorithm,
+        pad = pad,
+        output_type = output_type
+      )
+    )
+  }
+
+  # Tuning, if available
+  if (!is.null(x@tuner)) {
+    out <- paste0(
+      out,
+      fmt(
+        "\U2699",
+        col = col_tuner,
+        bold = TRUE,
+        pad = pad,
+        output_type = output_type
+      ),
+      " Tuned using ",
+      desc(x@tuner),
+      ".\n"
+    )
+  }
+
+  # Calibration, if available
+  if (prop_exists(x, "calibration_model")) {
+    out <- paste0(
+      out,
+      fmt(
+        "\U27CB",
+        col = col_calibrator,
+        bold = TRUE,
+        pad = pad,
+        output_type = output_type
+      ),
+      " Calibrated using ",
+      desc_alg(x@calibrator),
+      ".\n"
+    )
+  }
+
+  out <- paste0(out, "\n")
+
+  # {Regression, Classification} vs. CalibratedClassification
+  if (prop_exists(x, "calibration_model")) {
+    # CalibratedClassification
+    # Metrics, training
+    out <- paste0(
+      out,
+      # repr(x@metrics_training, pad = 2L, output_type = output_type)
+      repr_CalibratedClassificationMetrics(
+        x@metrics_training,
+        x@metrics_training_calibrated,
+        pad = pad + 2L,
+        output_type = output_type
+      )
+    )
+
+    # Metrics, validation
+    if (!is.null(x@metrics_validation)) {
+      out <- paste0(
+        out,
+        "\n",
+        repr_CalibratedClassificationMetrics(
+          x@metrics_validation,
+          x@metrics_validation_calibrated,
+          pad = pad + 2L,
+          output_type = output_type
+        )
+      )
+    }
+
+    # Metrics, test
+    if (!is.null(x@metrics_test)) {
+      out <- paste0(
+        out,
+        "\n",
+        repr_CalibratedClassificationMetrics(
+          x@metrics_test,
+          x@metrics_test_calibrated,
+          pad = pad + 2L,
+          output_type = output_type
+        )
+      )
+    }
+  } else {
+    # {Regression, Classification}
+
+    # Metrics, training
+    out <- paste0(
+      out,
+      repr(x@metrics_training, pad = pad + 2L, output_type = output_type)
+    )
+
+    # Metrics, validation
+    if (!is.null(x@metrics_validation)) {
+      out <- paste0(
+        out,
+        "\n",
+        repr(x@metrics_validation, pad = pad + 2L, output_type = output_type)
+      )
+    }
+
+    # Metrics, test
+    if (!is.null(x@metrics_test)) {
+      out <- paste0(
+        out,
+        "\n",
+        repr(x@metrics_test, pad = pad + 2L, output_type = output_type)
+      )
+    }
+  }
+
+  out
+} # /rtemis::repr.Supervised
+
+
+# %% to_json.Supervised ----
+#' to_json `Supervised`
+#'
+#' Convert a `Supervised` (or `Regression` / `Classification` /
+#' `CalibratedClassification`) object to a JSON-serializable list. Excludes
+#' native fitted objects, the full prediction and outcome vectors, and R
+#' session_info. Portable preprocessing and decomposition settings are carried
+#' by the run record; bulk predictions and outcomes are fetched as Arrow IPC.
+#'
+#' @param x `Supervised` object.
+#'
+#' @return Named list. Pass to `jsonlite::toJSON(auto_unbox = TRUE)`.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+method(to_json, Supervised) <- function(x, ...) {
+  # Use `.to_json_value()` for every prop -- it handles nested S7 objects,
+  # nested lists containing S7 objects, and primitive types uniformly,
+  # including props that may be NULL (e.g. `varimp` is either a
+  # `VariableImportance` object or NULL).
+  out <- list(
+    algorithm = x@algorithm,
+    type = x@type,
+    question = x@question,
+    description = desc(x), # used by rtemislive
+    xnames = x@xnames,
+    n_features = length(x@xnames),
+    hyperparameters = .to_json_value(wire_value(
+      x@hyperparameters,
+      S7_class(x)@properties[["hyperparameters"]]
+    )),
+    tuner = .to_json_value(x@tuner),
+    execution_config = .to_json_value(wire_value(
+      x@execution_config,
+      S7_class(x)@properties[["execution_config"]]
+    )),
+    metrics_training = .to_json_value(x@metrics_training),
+    metrics_validation = .to_json_value(x@metrics_validation),
+    metrics_test = .to_json_value(x@metrics_test),
+    varimp = .to_json_value(x@varimp)
+  )
+
+  # Subclass-specific extras
+  if (prop_exists(x, "binclasspos")) {
+    out[["binclasspos"]] <- x@binclasspos
+  }
+  if (prop_exists(x, "calibration_model")) {
+    out[["calibrator"]] <- x@calibrator
+    out[["calibration_model"]] <- .to_json_value(x@calibration_model)
+    if (prop_exists(x, "metrics_training_calibrated")) {
+      out[["metrics_training_calibrated"]] <-
+        .to_json_value(x@metrics_training_calibrated)
+    }
+    if (prop_exists(x, "metrics_validation_calibrated")) {
+      out[["metrics_validation_calibrated"]] <-
+        .to_json_value(x@metrics_validation_calibrated)
+    }
+    if (prop_exists(x, "metrics_test_calibrated")) {
+      out[["metrics_test_calibrated"]] <-
+        .to_json_value(x@metrics_test_calibrated)
+    }
+  }
+
+  Filter(Negate(is.null), out)
+} # /rtemis::to_json.Supervised
+
+
+# %% print.Supervised ----
+method(print, Supervised) <- function(
+  x,
+  output_type = NULL,
+  ...
+) {
+  cat(repr(x, output_type = output_type))
+  invisible(x)
+} # /rtemis::print.Supervised
+
+
+# %% desc_preprocessor_steps ----
+#' Human-readable summary of the active preprocessing steps
+#'
+#' Maps the preprocessor flags onto short labels for use in `desc()`
+#' sentences. Returns `character(0)` when no recognized step is active. Reads
+#' the case- and threshold-dropping steps through `pp_opt()`, since a
+#' `SupervisedPreprocessorConfig` does not carry them.
+#'
+#' @param config `PreprocessorConfig` or `SupervisedPreprocessorConfig` object.
+#'
+#' @return Character vector of step labels.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+desc_preprocessor_steps <- function(config) {
+  steps <- character()
+  if (isTRUE(pp_opt(config, "complete_cases"))) {
+    steps <- c(steps, "complete-case filtering")
+  }
+  if (!is.null(pp_opt(config, "remove_features_thres"))) {
+    steps <- c(steps, "high-missingness feature removal")
+  }
+  if (!is.null(pp_opt(config, "remove_cases_thres"))) {
+    steps <- c(steps, "high-missingness case removal")
+  }
+  if (isTRUE(config@impute)) {
+    steps <- c(steps, "imputation")
+  }
+  type_conversion <- c(
+    config@integer2factor,
+    config@integer2numeric,
+    config@logical2factor,
+    config@logical2numeric,
+    config@numeric2factor,
+    config@character2factor,
+    config@factor2integer
+  )
+  if (any(vapply(type_conversion, isTRUE, logical(1L)))) {
+    steps <- c(steps, "type conversion")
+  }
+  if (isTRUE(config@center)) {
+    steps <- c(steps, "centering")
+  }
+  if (isTRUE(config@scale)) {
+    steps <- c(steps, "scaling")
+  }
+  if (isTRUE(config@remove_constants)) {
+    steps <- c(steps, "constant-feature removal")
+  }
+  if (isTRUE(pp_opt(config, "remove_duplicates"))) {
+    steps <- c(steps, "duplicate removal")
+  }
+  if (!is.null(config@remove_features)) {
+    steps <- c(steps, "manual feature removal")
+  }
+  if (isTRUE(config@one_hot)) {
+    steps <- c(steps, "one-hot encoding")
+  }
+  if (isTRUE(config@add_date_features)) {
+    steps <- c(steps, "date feature extraction")
+  }
+  steps
+} # /rtemis::desc_preprocessor_steps
+
+
+# %% desc_preprocessing_decomposition ----
+#' Append preprocessing & decomposition sentences to a `desc()` string
+#'
+#' Shared by `desc.Supervised` and `desc.SupervisedRes`. Each argument
+#' contributes a sentence only when present. `decomposition` may be a
+#' `Decomposition` or a `DecompositionConfig`; both expose `@config` and
+#' `@algorithm`, and the resolved decomposed feature names are read from
+#' `@config@features` (`Decomposition`) or `@features` (`DecompositionConfig`).
+#'
+#' @param out Character: The description string to append to.
+#' @param preprocessor_config `PreprocessorConfig` / `SupervisedPreprocessorConfig` object or `NULL`.
+#' @param decomposition `Decomposition` / `DecompositionConfig` object or `NULL`.
+#'
+#' @return Character: `out` with any applicable sentences appended.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+desc_preprocessing_decomposition <- function(
+  out,
+  preprocessor_config,
+  decomposition
+) {
+  # Preprocessing ----
+  if (!is.null(preprocessor_config)) {
+    steps <- desc_preprocessor_steps(preprocessor_config)
+    out <- paste0(
+      out,
+      if (length(steps) > 0L) {
+        paste0(
+          " Preprocessing was applied (",
+          paste(steps, collapse = ", "),
+          ")."
+        )
+      } else {
+        " Preprocessing was applied."
+      }
+    )
+  }
+  # Decomposition ----
+  if (!is.null(decomposition)) {
+    # `decomposition` may be a `Decomposition` (whose `@config` is a
+    # `DecompositionConfig` exposing `@features`) or a `DecompositionConfig`
+    # (which exposes `@features` directly). Mirror the values reported by the
+    # `repr` methods: number of numeric features decomposed and number of
+    # components (`k`).
+    features <- if (S7_inherits(decomposition, Decomposition)) {
+      decomposition@config@features
+    } else {
+      decomposition@features
+    }
+    n_features <- length(features)
+    k <- decomposition@config[["k"]]
+    out <- paste0(
+      out,
+      " Decomposition was performed using ",
+      decomposition@algorithm,
+      ", reducing ",
+      n_features,
+      " numeric feature",
+      if (n_features != 1L) "s",
+      if (!is.null(k)) {
+        paste0(
+          " to ",
+          k,
+          " component",
+          if (k != 1L) "s"
+        )
+      },
+      "."
+    )
+  }
+  out
+} # /rtemis::desc_preprocessing_decomposition
+
+
+# %% desc.Supervised ----
+method(desc, Supervised) <- function(x) {
+  type <- x@type
+  algorithm <- desc_alg(x@algorithm)
+  out <- paste0(algorithm, " was used for ", tolower(type), ".")
+
+  # Preprocessing & Decomposition ----
+  out <- desc_preprocessing_decomposition(
+    out,
+    if (!is.null(x@preprocessor)) x@preprocessor@config else NULL,
+    x@decomposition
+  )
+
+  # Tuning ----
+  if (!is.null(x@tuner)) {
+    out <- paste0(
+      out,
+      " Hyperparameter tuning was performed using ",
+      desc(x@tuner),
+      "."
+    )
+  }
+
+  # Metrics ----
+  if (type == "Classification") {
+    out <- paste(
+      out,
+      "Balanced accuracy was",
+      ddSci(x@metrics_training[["overall"]][["balanced_accuracy"]]),
+      "in the training set"
+    )
+    if (!is.null(x@metrics_test[["overall"]][["balanced_accuracy"]])) {
+      out <- paste(
+        out,
+        "and",
+        ddSci(x@metrics_test[["overall"]][["balanced_accuracy"]]),
+        "in the test set."
+      )
+    } else {
+      out <- paste0(out, ".")
+    }
+  } else if (type == "Regression") {
+    out <- paste(
+      out,
+      "R-squared was",
+      ddSci(x@metrics_training[["rsq"]]),
+      "on the training set"
+    )
+    if (!is.null(x@metrics_test[["rsq"]])) {
+      out <- paste(
+        out,
+        "and",
+        ddSci(x@metrics_test[["rsq"]]),
+        "on the test set."
+      )
+    } else {
+      out <- paste0(out, ".")
+    }
+  }
+  invisible(out)
+} # /rtemis::desc.Supervised
+
+
+# %% describe.Supervised ----
+#' Describe `Supervised` object
+#'
+#' @param x `Supervised` object.
+#' @param ... Not used.
+#'
+#' @return Character string describing the `Supervised` object, invisibly.
+#'
+#' @author EDG
+#' @noRd
+#'
+#' @examples
+#' species_lightrf <- train(iris, hyperparameters = setup_LightRF())
+#' describe(species_lightrf)
+method(describe, Supervised) <- function(x, verbosity = 1L) {
+  descx <- desc(x)
+  if (verbosity >= 1L) {
+    cat(descx, "\n")
+  }
+  invisible(descx)
+} # /rtemis::describe.Supervised
+
+
+# %% Classification ----
+#' Classification
+#'
+#' @description
+#' Supervised subclass for classification models.
+#'
+#' @author EDG
+#' @noRd
+Classification <- schema_class(
+  name = "Classification",
+  package = "rtemis",
+  parent = Supervised,
+  properties = list(
+    # One row per case, one column per class -- and one column, the positive
+    # class's probability, in the binary case, where every backend reduces to a
+    # single score. `prob_matrix()` normalizes whatever the backend returned, so
+    # the shape is the same for every algorithm and every class count.
+    predicted_prob_training = prop_state(prop_external(prop_matrix(
+      nullable = TRUE,
+      items = prop_float(NULL, min = 0, max = 1, nullable = TRUE),
+      description = "Predicted training probabilities, one row per case; binary results contain the positive-level column selected by binclasspos, and multiclass columns follow the training outcome levels."
+    ))),
+    predicted_prob_validation = prop_state(prop_external(prop_matrix(
+      nullable = TRUE,
+      items = prop_float(NULL, min = 0, max = 1, nullable = TRUE),
+      description = "Predicted validation probabilities, one row per case; binary results contain the positive-level column selected by binclasspos, and multiclass columns follow the training outcome levels."
+    ))),
+    predicted_prob_test = prop_state(prop_external(prop_matrix(
+      nullable = TRUE,
+      items = prop_float(NULL, min = 0, max = 1, nullable = TRUE),
+      description = "Predicted test probabilities, one row per case; binary results contain the positive-level column selected by binclasspos, and multiclass columns follow the training outcome levels."
+    ))),
+    binclasspos = prop_integer(
+      2L,
+      min = 1L,
+      max = 2L,
+      description = "One-based position of the positive level for binary classification."
+    )
+  ),
+  publication = SchemaPublication(
+    kind = "report",
+    scope = "shared",
+    description = "Portable classification result."
+  ),
+  rules = c(
+    list(RequireConditions(
+      id = "classification.type",
+      message = "type must identify classification.",
+      conditions = list(SchemaPredicate(
+        property = "type",
+        equals = "Classification"
+      ))
+    )),
+    unlist(
+      lapply(c("training", "validation", "test"), function(sample) {
+        probabilities <- paste0("predicted_prob_", sample)
+        c(
+          lapply(c("y_", "predicted_"), function(prefix) {
+            other <- paste0(prefix, sample)
+            RowCountMatches(
+              id = paste0("classification.rows.", probabilities, ".", other),
+              left = probabilities,
+              right = other,
+              message = paste0(
+                probabilities,
+                " and ",
+                other,
+                " must have the same number of rows."
+              )
+            )
+          }),
+          list(ProbabilityColumnsMatch(
+            id = paste0(
+              "classification.columns.",
+              probabilities,
+              ".y_training"
+            ),
+            probabilities = probabilities,
+            outcome = "y_training",
+            message = paste0(
+              probabilities,
+              " must contain one column for binary classification or one column per training class for multiclass classification."
+            )
+          ))
+        )
+      }),
+      recursive = FALSE
+    )
+  ),
+  constructor = function(
+    algorithm = NULL,
+    model = NULL,
+    preprocessor = NULL, # Preprocessor
+    preprocessor_internal = NULL, # Algorithm-specific preprocessor
+    decomposition = NULL, # Decomposition
+    hyperparameters = NULL, # Hyperparameters
+    tuner = NULL, # Tuner
+    execution_config,
+    y_training = NULL,
+    y_validation = NULL,
+    y_test = NULL,
+    predicted_training = NULL,
+    predicted_validation = NULL,
+    predicted_test = NULL,
+    xnames = NULL,
+    varimp = NULL,
+    question = NULL,
+    data_fingerprint = NULL,
+    predicted_prob_training = NULL,
+    predicted_prob_validation = NULL,
+    predicted_prob_test = NULL,
+    binclasspos = 2L
+  ) {
+    classes <- levels(y_training)
+    predicted_prob_training <- prob_matrix(
+      predicted_prob_training,
+      classes,
+      binclasspos
+    )
+    predicted_prob_validation <- prob_matrix(
+      predicted_prob_validation,
+      classes,
+      binclasspos
+    )
+    predicted_prob_test <- prob_matrix(
+      predicted_prob_test,
+      classes,
+      binclasspos
+    )
+    metrics_training <- classification_metrics(
+      true_labels = y_training,
+      predicted_labels = predicted_training,
+      predicted_prob = predicted_prob_training,
+      sample = "Training"
+    )
+    metrics_validation <- if (!is.null(y_validation)) {
+      classification_metrics(
+        true_labels = y_validation,
+        predicted_labels = predicted_validation,
+        predicted_prob = predicted_prob_validation,
+        sample = "Validation"
+      )
+    } else {
+      NULL
+    }
+    metrics_test <- if (!is.null(y_test)) {
+      classification_metrics(
+        true_labels = y_test,
+        predicted_labels = predicted_test,
+        predicted_prob = predicted_prob_test,
+        sample = "Test"
+      )
+    } else {
+      NULL
+    }
+    new_object(
+      Supervised(
+        algorithm = algorithm,
+        model = model,
+        type = "Classification",
+        preprocessor = preprocessor,
+        preprocessor_internal = preprocessor_internal,
+        decomposition = decomposition,
+        hyperparameters = hyperparameters,
+        tuner = tuner,
+        execution_config = execution_config,
+        y_training = y_training,
+        y_validation = y_validation,
+        y_test = y_test,
+        predicted_training = predicted_training,
+        predicted_validation = predicted_validation,
+        predicted_test = predicted_test,
+        metrics_training = metrics_training,
+        metrics_validation = metrics_validation,
+        metrics_test = metrics_test,
+        xnames = xnames,
+        varimp = varimp,
+        question = question,
+        data_fingerprint = data_fingerprint
+      ),
+      predicted_prob_training = predicted_prob_training,
+      predicted_prob_validation = predicted_prob_validation,
+      predicted_prob_test = predicted_prob_test,
+      binclasspos = binclasspos
+    )
+  }
+) # /rtemis::Classification
+
+
+# %% CalibratedClassification ----
+#' CalibratedClassification
+#'
+#' @description
+#' Classification subclass for calibrated classification models.
+#' The classification_model can be trained on any data, ideally different from any data used by
+#' the classification model.
+#'
+#' @author EDG
+#' @noRd
+CalibratedClassification <- new_class(
+  name = "CalibratedClassification",
+  parent = Classification,
+  properties = list(
+    calibration_model = Supervised,
+    # The algorithm that produced the calibration map. `calibrate()` may
+    # substitute one calibrator for another, so this is read from the fitted
+    # model, so it names what ran and the run is reproducible from its output.
+    calibrator = new_property(
+      getter = function(self) {
+        self@calibration_model@algorithm
+      }
+    ),
+    # `prob2categorical()` builds these, so they are always factors: the class
+    # is calibrated *classification*, with no regression arm to widen for.
+    predicted_training_calibrated = class_factor,
+    predicted_validation_calibrated = NULL | class_factor,
+    predicted_test_calibrated = NULL | class_factor,
+    predicted_prob_training_calibrated = prop_state(prop_external(prop_matrix(
+      nullable = FALSE,
+      items = prop_float(NULL, min = 0, max = 1, nullable = TRUE),
+      description = "Calibrated training probabilities, one row per case; binary results contain the positive-level column selected by binclasspos, and multiclass columns follow the training outcome levels."
+    ))),
+    predicted_prob_validation_calibrated = prop_state(prop_external(prop_matrix(
+      nullable = TRUE,
+      items = prop_float(NULL, min = 0, max = 1, nullable = TRUE),
+      description = "Calibrated validation probabilities, one row per case; binary results contain the positive-level column selected by binclasspos, and multiclass columns follow the training outcome levels."
+    ))),
+    predicted_prob_test_calibrated = prop_state(prop_external(prop_matrix(
+      nullable = TRUE,
+      items = prop_float(NULL, min = 0, max = 1, nullable = TRUE),
+      description = "Calibrated test probabilities, one row per case; binary results contain the positive-level column selected by binclasspos, and multiclass columns follow the training outcome levels."
+    ))),
+    metrics_training_calibrated = Metrics,
+    metrics_validation_calibrated = NULL | Metrics,
+    metrics_test_calibrated = NULL | Metrics
+  ),
+  constructor = function(classification_model, calibration_model) {
+    # Predict calibrated probabilities of classification model datasets
+    # Calibrated probabilities are probabilities: same shape rule as the
+    # uncalibrated ones, so a consumer reads either without branching.
+    predicted_prob_training_calibrated <- prob_matrix(predict(
+      calibration_model,
+      data.frame(
+        predicted_probabilities = positive_prob(
+          classification_model@predicted_prob_training
+        )
+      )
+    ))
+    predicted_prob_validation_calibrated <- if (
+      !is.null(classification_model@predicted_prob_validation)
+    ) {
+      prob_matrix(predict(
+        calibration_model,
+        data.frame(
+          predicted_probabilities = positive_prob(
+            classification_model@predicted_prob_validation
+          )
+        )
+      ))
+    } else {
+      NULL
+    }
+    predicted_prob_test_calibrated <- if (
+      !is.null(classification_model@predicted_prob_test)
+    ) {
+      prob_matrix(predict(
+        calibration_model,
+        data.frame(
+          predicted_probabilities = positive_prob(
+            classification_model@predicted_prob_test
+          )
+        )
+      ))
+    } else {
+      NULL
+    }
+    # Predict calibrated labels of classification model datasets
+    predicted_training_calibrated <- prob2categorical(
+      predicted_prob_training_calibrated,
+      levels = levels(classification_model@y_training)
+    )
+    predicted_validation_calibrated <- if (
+      !is.null(classification_model@predicted_prob_validation)
+    ) {
+      prob2categorical(
+        predicted_prob_validation_calibrated,
+        levels = levels(classification_model@y_validation)
+      )
+    } else {
+      NULL
+    }
+    predicted_test_calibrated <- if (
+      !is.null(classification_model@predicted_prob_test)
+    ) {
+      prob2categorical(
+        predicted_prob_test_calibrated,
+        levels = levels(classification_model@y_test)
+      )
+    } else {
+      NULL
+    }
+    metrics_training_calibrated <- classification_metrics(
+      true_labels = classification_model@y_training,
+      predicted_labels = predicted_training_calibrated,
+      predicted_prob = predicted_prob_training_calibrated,
+      sample = "Calibrated Training"
+    )
+    metrics_validation_calibrated <- if (
+      !is.null(classification_model@y_validation)
+    ) {
+      classification_metrics(
+        true_labels = classification_model@y_validation,
+        predicted_labels = predicted_validation_calibrated,
+        predicted_prob = predicted_prob_validation_calibrated,
+        sample = "Calibrated Validation"
+      )
+    } else {
+      NULL
+    }
+    metrics_test_calibrated <- if (!is.null(classification_model@y_test)) {
+      classification_metrics(
+        true_labels = classification_model@y_test,
+        predicted_labels = predicted_test_calibrated,
+        predicted_prob = predicted_prob_test_calibrated,
+        sample = "Calibrated Test"
+      )
+    } else {
+      NULL
+    }
+    new_object(
+      classification_model,
+      calibration_model = calibration_model,
+      predicted_training_calibrated = predicted_training_calibrated,
+      predicted_validation_calibrated = predicted_validation_calibrated,
+      predicted_test_calibrated = predicted_test_calibrated,
+      predicted_prob_training_calibrated = predicted_prob_training_calibrated,
+      predicted_prob_validation_calibrated = predicted_prob_validation_calibrated,
+      predicted_prob_test_calibrated = predicted_prob_test_calibrated,
+      metrics_training_calibrated = metrics_training_calibrated,
+      metrics_validation_calibrated = metrics_validation_calibrated,
+      metrics_test_calibrated = metrics_test_calibrated
+    )
+  }
+) # /rtemis::CalibratedClassification
+
+
+# %% predict.CalibratedClassification ----
+method(predict, CalibratedClassification) <- function(
+  object,
+  newdata,
+  execution_config = NULL,
+  ...
+) {
+  check_inherits(newdata, "data.frame")
+  # Get the classification model's predicted probabilities, routing through the
+  # parent `Supervised` predict method so the stored preprocessor, decomposition,
+  # and algorithm-internal preprocessor are re-applied to `newdata` before the
+  # underlying model is queried. `predict` is an S3/base generic, so the parent
+  # `Supervised` method cannot be invoked via `super()`; call the shared pipeline
+  # helper instead.
+  # Calibration maps one score per case, so the positive class's column is what
+  # the calibration model was fitted on.
+  raw_prob <- positive_prob(predict_supervised_(
+    object,
+    newdata,
+    execution_config = execution_config
+  ))
+  # Get the calibration model's predicted probabilities
+  predict(
+    object@calibration_model,
+    newdata = data.frame(predicted_probabilities = raw_prob)
+  )
+} # /rtemis::predict.CalibratedClassification
+
+
+# %% Regression ----
+#' @title Regression
+#' @description
+#' Supervised subclass for regression models.
+#'
+#' @author EDG
+#' @noRd
+Regression <- schema_class(
+  name = "Regression",
+  parent = Supervised,
+  publication = SchemaPublication(
+    kind = "report",
+    scope = "shared",
+    description = "Portable regression result."
+  ),
+  rules = list(RequireConditions(
+    id = "regression.type",
+    message = "type must identify regression.",
+    conditions = list(SchemaPredicate(property = "type", equals = "Regression"))
+  )),
+  constructor = function(
+    algorithm = NULL,
+    model = NULL,
+    preprocessor = NULL, # Preprocessor
+    preprocessor_internal = NULL, # Algorithm-specific preprocessor
+    decomposition = NULL, # Decomposition
+    hyperparameters = NULL, # Hyperparameters
+    tuner = NULL, # Tuner
+    execution_config, # ExecutionConfig
+    y_training = NULL,
+    y_validation = NULL,
+    y_test = NULL,
+    predicted_training = NULL,
+    predicted_validation = NULL,
+    predicted_test = NULL,
+    xnames = NULL,
+    varimp = NULL,
+    question = NULL,
+    data_fingerprint = NULL
+  ) {
+    # Metrics ----
+    metrics_training <- regression_metrics(
+      y_training,
+      predicted_training,
+      sample = "Training"
+    )
+    metrics_validation <- if (!is.null(y_validation)) {
+      regression_metrics(
+        y_validation,
+        predicted_validation,
+        sample = "Validation"
+      )
+    } else {
+      NULL
+    }
+    metrics_test <- if (!is.null(y_test)) {
+      regression_metrics(
+        y_test,
+        predicted_test,
+        sample = "Test"
+      )
+    } else {
+      NULL
+    }
+    new_object(
+      Supervised(
+        algorithm = algorithm,
+        model = model,
+        type = "Regression",
+        preprocessor = preprocessor,
+        preprocessor_internal = preprocessor_internal,
+        decomposition = decomposition,
+        hyperparameters = hyperparameters,
+        tuner = tuner,
+        execution_config = execution_config,
+        y_training = y_training,
+        y_validation = y_validation,
+        y_test = y_test,
+        predicted_training = predicted_training,
+        predicted_validation = predicted_validation,
+        predicted_test = predicted_test,
+        metrics_training = metrics_training,
+        metrics_validation = metrics_validation,
+        metrics_test = metrics_test,
+        xnames = xnames,
+        varimp = varimp,
+        question = question,
+        data_fingerprint = data_fingerprint
+      )
+    )
+  }
+) # /rtemis::Regression
+
+
+# %% make_Supervised ----
+make_Supervised <- function(
+  algorithm = NULL,
+  model = NULL,
+  preprocessor = NULL,
+  preprocessor_internal = NULL,
+  decomposition = NULL,
+  hyperparameters = NULL,
+  tuner = NULL,
+  execution_config,
+  y_training = NULL,
+  y_validation = NULL,
+  y_test = NULL,
+  predicted_training = NULL,
+  predicted_validation = NULL,
+  predicted_test = NULL,
+  predicted_prob_training = NULL,
+  predicted_prob_validation = NULL,
+  predicted_prob_test = NULL,
+  xnames = character(),
+  varimp = NULL,
+  question = character(),
+  data_fingerprint = NULL,
+  binclasspos = 2L
+) {
+  # Supervised ----
+  if (is.factor(y_training)) {
+    Classification(
+      algorithm = algorithm,
+      model = model,
+      preprocessor = preprocessor,
+      preprocessor_internal = preprocessor_internal,
+      decomposition = decomposition,
+      hyperparameters = hyperparameters,
+      tuner = tuner,
+      execution_config = execution_config,
+      y_training = y_training,
+      y_validation = y_validation,
+      y_test = y_test,
+      predicted_training = predicted_training,
+      predicted_validation = predicted_validation,
+      predicted_test = predicted_test,
+      predicted_prob_training = predicted_prob_training,
+      predicted_prob_validation = predicted_prob_validation,
+      predicted_prob_test = predicted_prob_test,
+      xnames = xnames,
+      varimp = varimp,
+      question = question,
+      data_fingerprint = data_fingerprint,
+      binclasspos = binclasspos
+    )
+  } else {
+    Regression(
+      algorithm = algorithm,
+      model = model,
+      preprocessor = preprocessor,
+      preprocessor_internal = preprocessor_internal,
+      decomposition = decomposition,
+      hyperparameters = hyperparameters,
+      tuner = tuner,
+      execution_config = execution_config,
+      y_training = y_training,
+      y_validation = y_validation,
+      y_test = y_test,
+      predicted_training = predicted_training,
+      predicted_validation = predicted_validation,
+      predicted_test = predicted_test,
+      xnames = xnames,
+      varimp = varimp,
+      question = question,
+      data_fingerprint = data_fingerprint
+    )
+  }
+} # /rtemis::make_Supervised
+
+
+# %% write_Supervised ----
+write_Supervised <- function(
+  object,
+  outdir = NULL,
+  save_mod = FALSE,
+  verbosity = 1L
+) {
+  if (verbosity > 0L) {
+    print(object)
+  }
+
+  if (save_mod) {
+    rt_save(object, outdir, verbosity = verbosity)
+  }
+} # /rtemis::write_Supervised
+
+
+# %% SupervisedRes ----
+# fields metrics_training/metrics_validation/metrics_test
+# could be active bindings that are collected from @models
+#' SupervisedRes
+#'
+#' @description
+#' Superclass for Resampled supervised learning models.
+#'
+#' @author EDG
+#' @noRd
+SupervisedRes <- schema_class(
+  name = "SupervisedRes",
+  package = "rtemis",
+  properties = list(
+    algorithm = prop_string(
+      description = "Algorithm identifier of the fitted implementation."
+    ),
+    models = prop_state(prop_union(
+      list(
+        prop_collection(Regression, min_items = 1L),
+        prop_collection(Classification, min_items = 1L)
+      ),
+      description = "Fitted result for each successful resample, in resample_ids order."
+    )),
+    resample_ids = prop_state(prop_string(
+      vector = TRUE,
+      unique_items = TRUE,
+      description = "Identifiers of successful resamples in the order used by all per-resample arrays; each identifies a split in outer_resampler."
+    )),
+    type = prop_string(
+      enum = SUPERVISED_TYPES,
+      description = "Kind of supervised learning the models perform."
+    ),
+    preprocessor_config = prop_schema_choice(
+      prop_object(
+        SupervisedPreprocessorConfig,
+        nullable = TRUE,
+        description = "Preprocessing settings requested for each resample."
+      ),
+      additional_schemas = list(
+        `rtemis-ml::PreprocessorConfig` = "https://schema.rtemis.org/preprocessor/python/v1/schema.json"
+      )
+    ),
+    decomposition_config = prop_object(
+      DecompositionConfig,
+      nullable = TRUE,
+      description = "Feature decomposition settings requested for each resample."
+    ),
+    # A resampled run holds what was *asked for*, and that may be a set: each
+    # fold tunes independently and may select a different member, so there is no
+    # single winner at this level. The per-fold winners are on the models, whose
+    # own `hyperparameters` is always one resolved configuration.
+    hyperparameters = prop_schema_choice(
+      prop_object_choice(
+        Hyperparameters,
+        HyperparametersSet,
+        presence_key = "variants",
+        nullable = TRUE,
+        description = "Requested algorithm settings or named variants; successful folds hold their selected settings."
+      ),
+      additional_schemas = list(
+        `rtemis-ml::Hyperparameters` = "https://schema.rtemis.org/hyperparameters/python/v1/schema.json"
+      )
+    ),
+    tuner_config = prop_object(
+      TunerConfig,
+      nullable = TRUE,
+      description = "Tuning settings requested for each resample."
+    ),
+    outer_resampler = prop_object(
+      Resampler,
+      description = "All requested outer splits, including splits whose models failed."
+    ),
+    execution_config = prop_schema_choice(
+      prop_object(
+        ExecutionConfig,
+        description = "Execution settings used by this implementation."
+      ),
+      additional_schemas = list(
+        `rtemis-ml::ExecutionConfig` = "https://schema.rtemis.org/execution/python/v1/schema.json"
+      )
+    ),
+    # One element per resample, each a `Supervised`-shaped outcome vector.
+    y_training = prop_state(prop_union(
+      list(
+        prop_array(prop_external(prop_array(
+          prop_float(NULL, nullable = TRUE),
+          nullable = FALSE
+        ))),
+        prop_array(prop_external(prop_factor(
+          allow_missing = TRUE,
+          nullable = FALSE
+        )))
+      ),
+      description = "Observed outcomes for each training sample, in resample_ids order."
+    )),
+    y_test = prop_state(prop_union(
+      list(
+        prop_array(prop_external(prop_array(
+          prop_float(NULL, nullable = TRUE),
+          nullable = TRUE
+        ))),
+        prop_array(prop_external(prop_factor(
+          allow_missing = TRUE,
+          nullable = TRUE
+        )))
+      ),
+      description = "Observed outcomes for each test sample, in resample_ids order; null entries preserve unavailable samples."
+    )),
+    # One element per resample, each a `Supervised`-shaped prediction vector.
+    predicted_training = prop_state(prop_union(
+      list(
+        prop_array(prop_external(prop_array(
+          prop_float(NULL, nullable = TRUE),
+          nullable = FALSE
+        ))),
+        prop_array(prop_external(prop_factor(
+          allow_missing = TRUE,
+          nullable = FALSE
+        )))
+      ),
+      description = "Predictions for each training sample, in resample_ids order."
+    )),
+    predicted_test = prop_state(prop_union(
+      list(
+        prop_array(prop_external(prop_array(
+          prop_float(NULL, nullable = TRUE),
+          nullable = TRUE
+        ))),
+        prop_array(prop_external(prop_factor(
+          allow_missing = TRUE,
+          nullable = TRUE
+        )))
+      ),
+      description = "Predictions for each test sample, in resample_ids order; null entries preserve unavailable samples."
+    )),
+    metrics_training = prop_state(prop_union(
+      list(
+        prop_object(RegressionMetricsRes),
+        prop_object(ClassificationMetricsRes)
+      ),
+      description = "Per-resample training metrics and aggregate summaries; res_metrics follows resample_ids order."
+    )),
+    metrics_test = prop_state(prop_union(
+      list(
+        prop_object(RegressionMetricsRes),
+        prop_object(ClassificationMetricsRes)
+      ),
+      description = "Per-resample test metrics and aggregate summaries; res_metrics follows resample_ids order."
+    )),
+    xnames = prop_string(
+      vector = TRUE,
+      description = "Predictor names in the order expected by the fitted model."
+    ),
+    varimp = prop_state(prop_array(
+      prop_object(VariableImportance, nullable = TRUE),
+      nullable = TRUE,
+      description = "Variable importance in resample_ids order; a null element denotes an unavailable importance result."
+    )),
+    question = prop_string(
+      NULL,
+      nullable = TRUE,
+      description = "Question addressed by this analysis."
+    ),
+    # See `Supervised` for the provenance and input rationale.
+    config = prop_runtime(
+      "Native input configuration, which may contain in-memory data; portable settings are carried by the run record.",
+      cls = SuperConfig
+    ),
+    data_fingerprint = prop_object(
+      DataFingerprint,
+      nullable = TRUE,
+      description = "Fingerprint of the training data."
+    ),
+    # R-specific by construction, and what a consumer outside R would want
+    # from it -- versions, platform -- is what `Provenance` publishes.
+    session_info = prop_r_only(new_property(class_any)),
+    session = prop_runtime(
+      "Native execution session; portable history is carried by the session artifact.",
+      cls = SupervisedSession
+    )
+  ),
+  publication = SchemaPublication(
+    kind = "report",
+    scope = "shared",
+    description = "Portable supervised results aggregated over successful resamples."
+  ),
+  rules = unlist(
+    lapply(
+      c(
+        "models",
+        "y_training",
+        "y_test",
+        "predicted_training",
+        "predicted_test",
+        "metrics_training",
+        "metrics_test"
+      ),
+      function(nm) {
+        lapply(seq_along(SUPERVISED_TYPES), function(i) {
+          UnionSelectionRule(
+            id = paste0(
+              "supervisedres.",
+              tolower(SUPERVISED_TYPES[[i]]),
+              ".",
+              nm
+            ),
+            message = paste0(
+              nm,
+              " must use the ",
+              tolower(SUPERVISED_TYPES[[i]]),
+              " representation selected by type."
+            ),
+            property = nm,
+            alternative = i,
+            when = SchemaPredicate(
+              property = "type",
+              equals = SUPERVISED_TYPES[[i]]
+            )
+          )
+        })
+      }
+    ),
+    recursive = FALSE
+  ),
+  constructor = function(
+    algorithm,
+    models,
+    type,
+    preprocessor_config,
+    decomposition_config,
+    hyperparameters,
+    tuner_config,
+    outer_resampler,
+    execution_config,
+    y_training,
+    y_test,
+    predicted_training,
+    predicted_test,
+    metrics_training,
+    metrics_test,
+    metrics_training_mean,
+    metrics_test_mean,
+    xnames,
+    varimp,
+    question,
+    data_fingerprint = NULL
+  ) {
+    new_object(
+      S7::S7_object(),
+      algorithm = algorithm,
+      models = models,
+      resample_ids = names(models),
+      type = type,
+      preprocessor_config = preprocessor_config,
+      decomposition_config = decomposition_config,
+      hyperparameters = hyperparameters,
+      tuner_config = tuner_config,
+      outer_resampler = outer_resampler,
+      execution_config = execution_config,
+      y_training = y_training,
+      y_test = y_test,
+      predicted_training = predicted_training,
+      predicted_test = predicted_test,
+      metrics_training = metrics_training,
+      metrics_test = metrics_test,
+      xnames = xnames,
+      varimp = varimp,
+      question = question,
+      data_fingerprint = data_fingerprint,
+      session_info = session_info(),
+      session = NULL
+    )
+  }
+) # /rtemis::SupervisedRes
+
+
+# %% repr.SupervisedRes ----
+#' repr `SupervisedRes`
+#'
+#' @param x `SupervisedRes` object.
+#' @param output_type Character {"ansi", "html", or "plain"}: Output type.
+#' @param filename Character: Filename to save output to (not used).
+#'
+#' @author EDG
+#'
+#' @keywords internal
+#' @noRd
+method(repr, SupervisedRes) <- function(
+  x,
+  output_type = NULL,
+  filename = NULL
+) {
+  output_type <- get_output_type(output_type, filename)
+
+  # Class name + Alg name (2 lines)
+  out <- paste0(
+    repr_S7name(paste("Resampled", x@type, "Model"), output_type = output_type),
+    highlight(x@algorithm, output_type = output_type),
+    " (",
+    desc_alg(x@algorithm),
+    ")\n"
+  )
+
+  # Preprocessing, if available (1 line)
+  if (!is.null(x@preprocessor_config)) {
+    steps <- desc_preprocessor_steps(x@preprocessor_config)
+    out <- paste0(
+      out,
+      fmt(
+        "\U25A3",
+        col = col_preprocessor,
+        bold = TRUE,
+        output_type = output_type
+      ),
+      if (length(steps) > 0L) {
+        paste0(" Preprocessed using ", paste(steps, collapse = ", "), ".\n")
+      } else {
+        " Preprocessed.\n"
+      }
+    )
+  }
+
+  # Decomposition, if available (1 line)
+  # `k` and algorithm come from the (shared) config; the resolved feature count
+  # is read from the first fold's decomposition.
+  if (
+    !is.null(x@decomposition_config) &&
+      length(x@models) > 0L &&
+      !is.null(x@models[[1L]]@decomposition) &&
+      !is.null(x@models[[1L]]@decomposition@config@features)
+  ) {
+    out <- paste0(
+      out,
+      repr_decomposition_line(
+        n_features = length(x@models[[1L]]@decomposition@config@features),
+        k = x@decomposition_config[["k"]],
+        algorithm = x@decomposition_config@algorithm,
+        output_type = output_type
+      )
+    )
+  }
+
+  # Tuning, if available (1 line)
+  if (!is.null(x@tuner_config)) {
+    out <- paste0(
+      out,
+      fmt("\U2699", col = col_tuner, bold = TRUE, output_type = output_type),
+      " Tuned using ",
+      desc(x@tuner_config),
+      ".\n"
+    )
+  }
+
+  # Outer resampling (1 line)
+  out <- paste0(
+    out,
+    fmt("\U27F3", col = col_outer, bold = TRUE, output_type = output_type),
+    " Tested using ",
+    desc(x@outer_resampler),
+    ".\n"
+  )
+
+  # Calibration, if available
+  if (prop_exists(x, "calibration_models")) {
+    out <- paste0(
+      out,
+      fmt(
+        "\U27CB",
+        col = col_calibrator,
+        bold = TRUE,
+        output_type = output_type
+      ),
+      " Calibrated using ",
+      desc_alg(x@calibrator),
+      " with ",
+      desc(x@calibration_models[[1]]@outer_resampler@config),
+      ".\n"
+    )
+  }
+
+  out <- paste0(out, "\n")
+
+  # Metrics, training
+  if (prop_exists(x, "calibration_models")) {
+    out <- paste0(
+      out,
+      repr_CalibratedClassificationResMetrics(
+        x@metrics_training,
+        x@metrics_training_calibrated,
+        pad = 2L,
+        output_type = output_type
+      )
+    )
+  } else {
+    out <- paste0(
+      out,
+      repr(x@metrics_training, pad = 2L, output_type = output_type)
+    )
+  }
+
+  # Metrics, test
+  if (prop_exists(x, "calibration_models")) {
+    out <- paste0(
+      out,
+      "\n",
+      repr_CalibratedClassificationResMetrics(
+        x@metrics_test,
+        x@metrics_test_calibrated,
+        pad = 2L,
+        output_type = output_type
+      )
+    )
+  } else {
+    out <- paste0(
+      out,
+      "\n",
+      repr(x@metrics_test, pad = 2L, output_type = output_type)
+    )
+  }
+
+  out
+} # /rtemis::repr.SupervisedRes
+
+
+# %% to_json.SupervisedRes ----
+#' to_json `SupervisedRes`
+#'
+#' Convert a `SupervisedRes` (or `RegressionRes` / `ClassificationRes`)
+#' object to a JSON-serializable list. The list of per-resample fitted
+#' models (`@models`) is summarized by length only -- individual model
+#' details remain available on the server and can be fetched via
+#' separate `job.result` requests if needed.
+#'
+#' @param x `SupervisedRes` object.
+#'
+#' @return Named list. Pass to `jsonlite::toJSON(auto_unbox = TRUE)`.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+method(to_json, SupervisedRes) <- function(x, ...) {
+  out <- list(
+    algorithm = x@algorithm,
+    type = x@type,
+    question = x@question,
+    # Human-readable model summary (algorithm, tuning, headline metrics across
+    # resamples), so consumers can show a one-line description without
+    # re-deriving it.
+    description = desc(x),
+    xnames = x@xnames,
+    n_features = length(x@xnames),
+    n_resamples = length(x@models),
+    preprocessor_config = .to_json_value(x@preprocessor_config),
+    decomposition_config = .to_json_value(x@decomposition_config),
+    hyperparameters = .to_json_value(wire_value(
+      x@hyperparameters,
+      S7_class(x)@properties[["hyperparameters"]]
+    )),
+    tuner_config = .to_json_value(x@tuner_config),
+    outer_resampler = .to_json_value(x@outer_resampler),
+    # Human-readable resampling strategy (e.g. "10 independent folds"), so
+    # consumers can caption aggregate results without re-deriving it.
+    resampler_desc = desc(x@outer_resampler),
+    execution_config = .to_json_value(wire_value(
+      x@execution_config,
+      S7_class(x)@properties[["execution_config"]]
+    )),
+    metrics_training = .to_json_value(x@metrics_training),
+    metrics_test = .to_json_value(x@metrics_test),
+    # varimp is `NULL | class_list` of VariableImportance.
+    # `.to_json_value` recurses through lists, dispatching `to_json` on
+    # S7 elements and passing through anything else.
+    varimp_per_resample = .to_json_value(x@varimp)
+  )
+
+  # Subclass-specific extras
+  if (prop_exists(x, "calibration_models")) {
+    out[["calibrator"]] <- x@calibrator
+    out[["metrics_training_calibrated"]] <-
+      .to_json_value(x@metrics_training_calibrated)
+    out[["metrics_test_calibrated"]] <-
+      .to_json_value(x@metrics_test_calibrated)
+  }
+
+  Filter(Negate(is.null), out)
+} # /rtemis::to_json.SupervisedRes
+
+
+# %% print.SupervisedRes ----
+method(print, SupervisedRes) <- function(
+  x,
+  output_type = NULL,
+  ...
+) {
+  cat(repr(x, output_type = output_type))
+  invisible(x)
+} # /rtemis::print.SupervisedRes
+
+
+# %% `$`.SupervisedRes ----
+method(`$`, SupervisedRes) <- function(x, name) {
+  prop_by_name(x, name)
+}
+
+
+# %% `.DollarNames`.SupervisedRes ----
+method(`.DollarNames`, SupervisedRes) <- function(x, pattern = "") {
+  prop_names_matching(x, pattern)
+}
+
+
+# %% `[[`.SupervisedRes ----
+method(`[[`, SupervisedRes) <- function(x, name) {
+  prop_by_name(x, name)
+}
+
+
+# %% predict.SupervisedRes ----
+#' Predict SupervisedRes
+#'
+#' Predict Method for SupervisedRes objects
+#'
+#' @param object `SupervisedRes` object.
+#' @param newdata data.frame or similar: New data to predict.
+#' @param type Character: Type of prediction to output: "avg" applies `avg_fn` to
+#' the predictions of individual models, "all" returns the predictions of all models in a
+#' data.frame. "metrics" returns a list of data.frames with a) predictions from each model, b)
+#' the mean of the predictions, and c) the standard deviation of the predictions.
+#' @param execution_config Optional `ExecutionConfig` object: Threads for a
+#' backend that threads at prediction; `NULL` uses the host's default worker
+#' count.
+#' @param ... Not used.
+#'
+#' @keywords internal
+#' @noRd
+method(predict, SupervisedRes) <- function(
+  object,
+  newdata,
+  type = c("avg", "all", "metrics"),
+  avg_fn = "mean",
+  execution_config = NULL,
+  ...
+) {
+  check_inherits(newdata, "data.frame")
+  type <- match_arg(type, c("avg", "all", "metrics"))
+  # One element per resample, each in the shape a single model predicts: a
+  # numeric vector for a regression, an `n x k` probability matrix for a
+  # classification. Collected as a list: `sapply()` would flatten a matrix into
+  # a column and lose the class dimension.
+  per_fold <- lapply(object@models, function(mod) {
+    predict(mod, newdata = newdata, execution_config = execution_config)
+  })
+  switch(
+    type,
+    all = fold_predictions(per_fold),
+    avg = aggregate_fold_predictions(per_fold, avg_fn),
+    metrics = list(
+      predictions = fold_predictions(per_fold),
+      # Per case across resamples: the ensemble's prediction and how much the
+      # resamples disagreed about it. Averaging the other way round -- over
+      # cases within each resample -- would describe the outcome's distribution
+      # instead of the prediction.
+      mean = aggregate_fold_predictions(per_fold, "mean"),
+      sd = aggregate_fold_predictions(per_fold, "sd")
+    )
+  )
+} # /rtemis::predict.SupervisedRes
+
+
+# %% fold_predictions ----
+#' Per-resample predictions in their natural shape
+#'
+#' A regression predicts one number per case, so the resamples make an
+#' `n x n_resamples` matrix. A classification predicts a row of probabilities per
+#' case, which cannot be a column of anything, so the resamples stay a named
+#' list of matrices -- the shape `@predicted_test` and `@y_test` already use.
+#'
+#' @param per_fold List: One element per resample, as a single model predicts.
+#'
+#' @return Numeric matrix for a regression, named list of matrices for a
+#' classification.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+fold_predictions <- function(per_fold) {
+  if (is.matrix(per_fold[[1L]])) {
+    return(per_fold)
+  }
+  do.call(cbind, per_fold)
+} # /rtemis::fold_predictions
+
+
+# %% aggregate_fold_predictions ----
+#' Aggregate per-resample predictions to one per case
+#'
+#' Returns the shape a *single* model would predict, so a resampled model's
+#' prediction can be read the same way as one fold's: a numeric vector for a
+#' regression, an `n x k` matrix for a classification, class names intact.
+#'
+#' @param per_fold List: One element per resample, as a single model predicts.
+#' @param fn Character or function: Aggregator applied across resamples, per
+#' case and -- for a classification -- per class.
+#'
+#' @return Numeric vector for a regression, numeric matrix for a classification.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+aggregate_fold_predictions <- function(per_fold, fn) {
+  first <- per_fold[[1L]]
+  if (!is.matrix(first)) {
+    return(apply(do.call(cbind, per_fold), 1L, fn))
+  }
+  stacked <- array(
+    unlist(per_fold, use.names = FALSE),
+    dim = c(nrow(first), ncol(first), length(per_fold))
+  )
+  # `apply()` drops the result to a vector when one class is left standing --
+  # the binary case, where `prob_matrix()` stores a single column -- so the
+  # shape is restored for every class count.
+  out <- matrix(
+    apply(stacked, c(1L, 2L), fn),
+    nrow = nrow(first),
+    ncol = ncol(first)
+  )
+  dimnames(out) <- dimnames(first)
+  out
+} # /rtemis::aggregate_fold_predictions
+
+
+# %% ClassificationRes ----
+#' @title ClassificationRes
+#'
+#' @description
+#' SupervisedRes subclass for Resampled classification models.
+#'
+#' @author EDG
+#' @noRd
+ClassificationRes <- schema_class(
+  name = "ClassificationRes",
+  parent = SupervisedRes,
+  properties = list(
+    predicted_prob_training = prop_state(prop_array(
+      prop_external(prop_matrix(
+        nullable = TRUE,
+        items = prop_float(NULL, min = 0, max = 1, nullable = TRUE)
+      )),
+      nullable = TRUE,
+      description = "Training probability matrices in resample_ids order. Each matrix uses its model's class order and binary positive level; null entries preserve unavailable probabilities."
+    )),
+    predicted_prob_test = prop_state(prop_array(
+      prop_external(prop_matrix(
+        nullable = TRUE,
+        items = prop_float(NULL, min = 0, max = 1, nullable = TRUE)
+      )),
+      nullable = TRUE,
+      description = "Test probability matrices in resample_ids order. Each matrix uses its model's class order and binary positive level; null entries preserve unavailable probabilities."
+    ))
+  ),
+  publication = SchemaPublication(
+    kind = "report",
+    scope = "shared",
+    description = "Portable classification results aggregated over successful resamples."
+  ),
+  rules = list(RequireConditions(
+    id = "classificationres.type",
+    message = "type must identify classification.",
+    conditions = list(SchemaPredicate(
+      property = "type",
+      equals = "Classification"
+    ))
+  )),
+  constructor = function(
+    algorithm,
+    models,
+    preprocessor_config = NULL,
+    decomposition_config = NULL,
+    hyperparameters,
+    tuner_config,
+    outer_resampler,
+    execution_config,
+    y_training,
+    y_validation = NULL,
+    y_test = NULL,
+    predicted_training = NULL,
+    predicted_test = NULL,
+    predicted_prob_training = NULL,
+    predicted_prob_test = NULL,
+    xnames = NULL,
+    varimp = NULL,
+    question = NULL,
+    data_fingerprint = NULL
+  ) {
+    # Dimension names are not set here: `ClassificationMetricsRes` stores the
+    # long form and derives the wide table, which labels both dimensions
+    # uniformly.
+    conf_mat_training <- conf_table(
+      unlist(y_training),
+      unlist(predicted_training)
+    )
+    conf_mat_test <- conf_table(
+      unlist(y_test),
+      unlist(predicted_test)
+    )
+    metrics_training <- ClassificationMetricsRes(
+      sample = "Training",
+      # Aggregate confusion matrix from concatenated true and predicted labels
+      confusion_matrix = conf_mat_training,
+      res_metrics = lapply(models, function(mod) mod@metrics_training)
+    )
+    metrics_test <- ClassificationMetricsRes(
+      sample = "Test",
+      # Aggregate confusion matrix from concatenated true and predicted labels
+      confusion_matrix = conf_mat_test,
+      res_metrics = lapply(models, function(mod) mod@metrics_test)
+    )
+    new_object(
+      SupervisedRes(
+        algorithm = algorithm,
+        models = models,
+        type = "Classification",
+        preprocessor_config = preprocessor_config,
+        decomposition_config = decomposition_config,
+        hyperparameters = hyperparameters,
+        tuner_config = tuner_config,
+        outer_resampler = outer_resampler,
+        execution_config = execution_config,
+        y_training = y_training,
+        y_test = y_test,
+        predicted_training = predicted_training,
+        predicted_test = predicted_test,
+        metrics_training = metrics_training,
+        metrics_test = metrics_test,
+        # metrics_training_mean = metrics_training_mean,
+        # metrics_test_mean = metrics_test_mean,
+        xnames = xnames,
+        varimp = varimp,
+        question = question,
+        data_fingerprint = data_fingerprint
+      ),
+      predicted_prob_training = predicted_prob_training,
+      predicted_prob_test = predicted_prob_test
+    )
+  }
+) # /rtemis::ClassificationRes
+
+
+# %% CalibratedClassificationRes ----
+#' @title CalibratedClassificationRes
+#'
+#' @description
+#' ClassificationRes subclass for calibrated classification models.
+#' The calibration models are trained on resamples of the `ClassificationRes`'s test data.
+#'
+#' @author EDG
+#' @noRd
+# We use getter functions to avoid duplicating data
+CalibratedClassificationRes <- new_class(
+  name = "CalibratedClassificationRes",
+  parent = ClassificationRes,
+  properties = list(
+    calibration_models = class_list,
+    # See `CalibratedClassification@calibrator`. Every resample is calibrated
+    # with the same algorithm, so the first model names it for all of them.
+    calibrator = new_property(
+      getter = function(self) {
+        self@calibration_models[[1L]]@algorithm
+      }
+    ),
+    predicted_training_calibrated = new_property(
+      getter = function(self) {
+        lapply(self@calibration_models, function(mod) {
+          mod@predicted_training
+        })
+      }
+    ),
+    predicted_test_calibrated = new_property(
+      getter = function(self) {
+        lapply(self@calibration_models, function(mod) {
+          mod@predicted_test
+        })
+      }
+    ),
+    predicted_prob_training_calibrated = new_property(
+      getter = function(self) {
+        lapply(self@calibration_models, function(mod) {
+          mod@predicted_prob_training
+        })
+      }
+    ),
+    predicted_prob_test_calibrated = new_property(
+      getter = function(self) {
+        lapply(self@calibration_models, function(mod) {
+          mod@predicted_prob_test
+        })
+      }
+    ),
+    metrics_training_calibrated = ClassificationMetricsRes,
+    metrics_test_calibrated = ClassificationMetricsRes
+  ),
+  constructor = function(ClassificationRes_model, calibrations_models) {
+    # Aggregate calibrated metrics from individual models within each calibration resample
+    # calibrations_models is a list of *Res objects, each containing multiple models
+    # We need to extract all individual model metrics and aggregate them
+    all_training_metrics <- unlist(
+      lapply(calibrations_models, function(calmod) {
+        calmod@metrics_training@res_metrics
+      }),
+      recursive = FALSE
+    )
+    all_test_metrics <- unlist(
+      lapply(calibrations_models, function(calmod) {
+        calmod@metrics_test@res_metrics
+      }),
+      recursive = FALSE
+    )
+
+    metrics_training_calibrated <- ClassificationMetricsRes(
+      sample = "Training",
+      confusion_matrix = conf_table(
+        unlist(ClassificationRes_model@y_training),
+        unlist(ClassificationRes_model@predicted_training)
+      ),
+      res_metrics = all_training_metrics
+    )
+    metrics_test_calibrated <- ClassificationMetricsRes(
+      sample = "Test",
+      confusion_matrix = conf_table(
+        unlist(ClassificationRes_model@y_test),
+        unlist(ClassificationRes_model@predicted_test)
+      ),
+      res_metrics = all_test_metrics
+    )
+
+    new_object(
+      ClassificationRes_model,
+      calibration_models = calibrations_models,
+      metrics_training_calibrated = metrics_training_calibrated,
+      metrics_test_calibrated = metrics_test_calibrated
+    )
+  }
+) # /rtemis::CalibratedClassificationRes
+
+
+# %% predict.CalibratedClassificationRes ----
+method(predict, CalibratedClassificationRes) <- function(
+  object,
+  newdata,
+  type = c("avg", "all", "metrics"),
+  avg_fn = "mean",
+  execution_config = NULL,
+  ...
+) {
+  check_inherits(newdata, "data.frame")
+  # `type`, as on every other resampled predict method. It was `what` here, so a
+  # caller who learned `type` on a `SupervisedRes` had it swallowed by `...` and
+  # got the default back without a word.
+  type <- match_arg(type, c("avg", "all", "metrics"))
+
+  # Check lengths match
+  if (length(object@models) != length(object@calibration_models)) {
+    rtemis.core::abort(
+      "Number of base models and calibration models must match.",
+      class = c("rtemis_length_error", "rtemis_input_error")
+    )
+  }
+
+  per_fold <- mapply(
+    function(base_mod, cal_mod) {
+      # 1. Predict with base model. Calibration maps one score per case, so
+      #    take the positive class's column.
+      raw_prob <- positive_prob(predict(
+        base_mod,
+        newdata = newdata,
+        execution_config = execution_config
+      ))
+
+      # 2. Predict with calibration model
+      predict(
+        cal_mod,
+        newdata = data.frame(predicted_probabilities = raw_prob)
+      )
+    },
+    object@models,
+    object@calibration_models,
+    SIMPLIFY = FALSE
+  ) # -> one `n x 1` calibrated probability matrix per resample
+
+  # Same shapes and the same per-case aggregation as `predict.SupervisedRes`,
+  # since a calibrated probability is still a probability.
+  switch(
+    type,
+    all = fold_predictions(per_fold),
+    avg = aggregate_fold_predictions(per_fold, avg_fn),
+    metrics = list(
+      predictions = fold_predictions(per_fold),
+      mean = aggregate_fold_predictions(per_fold, "mean"),
+      sd = aggregate_fold_predictions(per_fold, "sd")
+    )
+  )
+} # /rtemis::predict.CalibratedClassificationRes
+
+
+# %% RegressionRes ----
+#' @title RegressionRes
+#'
+#' @description
+#' SupervisedRes subclass for Resampled regression models.
+#'
+#' @author EDG
+#' @noRd
+RegressionRes <- schema_class(
+  name = "RegressionRes",
+  parent = SupervisedRes,
+  publication = SchemaPublication(
+    kind = "report",
+    scope = "shared",
+    description = "Portable regression results aggregated over successful resamples."
+  ),
+  rules = list(RequireConditions(
+    id = "regressionres.type",
+    message = "type must identify regression.",
+    conditions = list(SchemaPredicate(property = "type", equals = "Regression"))
+  )),
+  constructor = function(
+    algorithm,
+    models,
+    preprocessor_config = NULL,
+    decomposition_config = NULL,
+    hyperparameters,
+    tuner_config,
+    outer_resampler,
+    execution_config,
+    y_training,
+    y_validation = NULL,
+    y_test = NULL,
+    predicted_training = NULL,
+    predicted_test = NULL,
+    xnames = NULL,
+    varimp = NULL,
+    question = NULL,
+    data_fingerprint = NULL
+  ) {
+    metrics_training <- lapply(
+      models,
+      function(mod) mod@metrics_training@metrics
+    )
+    metrics_test <- lapply(models, function(mod) mod@metrics_test@metrics)
+    metrics_training <- RegressionMetricsRes(
+      sample = "Training",
+      res_metrics = lapply(models, function(mod) mod@metrics_training)
+    )
+    metrics_test <- RegressionMetricsRes(
+      sample = "Test",
+      res_metrics = lapply(models, function(mod) mod@metrics_test)
+    )
+    new_object(
+      SupervisedRes(
+        algorithm = algorithm,
+        models = models,
+        type = "Regression",
+        preprocessor_config = preprocessor_config,
+        decomposition_config = decomposition_config,
+        hyperparameters = hyperparameters,
+        tuner_config = tuner_config,
+        outer_resampler = outer_resampler,
+        execution_config = execution_config,
+        y_training = y_training,
+        y_test = y_test,
+        predicted_training = predicted_training,
+        predicted_test = predicted_test,
+        metrics_training = metrics_training,
+        metrics_test = metrics_test,
+        # metrics_training_mean = metrics_training_mean,
+        # metrics_test_mean = metrics_test_mean,
+        xnames = xnames,
+        varimp = varimp,
+        question = question,
+        data_fingerprint = data_fingerprint
+      )
+    )
+  }
+) # /rtemis::RegressionRes
+
+
+# %% desc.SupervisedRes ----
+method(desc, SupervisedRes) <- function(x, metric = NULL) {
+  type <- x@type
+  algorithm <- desc_alg(x@algorithm)
+  # cat(algorithm, " was used for ", tolower(type), ".\n", sep = "")
+  out <- paste0(algorithm, " was used for ", tolower(type), ".")
+
+  # Preprocessing & Decomposition ----
+  # The configs are shared identically across all outer folds; describe from
+  # the configs stored on the resampled object. For decomposition, prefer the
+  # fitted `Decomposition` of the first fold (which carries the resolved feature
+  # names) so the reported feature count matches `repr.SupervisedRes`; fall back
+  # to the shared config when no fitted model is available.
+  decomposition <- if (
+    !is.null(x@decomposition_config) &&
+      length(x@models) > 0L &&
+      !is.null(x@models[[1L]]@decomposition)
+  ) {
+    x@models[[1L]]@decomposition
+  } else {
+    x@decomposition_config
+  }
+  out <- desc_preprocessing_decomposition(
+    out,
+    x@preprocessor_config,
+    decomposition
+  )
+
+  # Tuning ----
+  if (!is.null(x@tuner_config)) {
+    out <- paste0(
+      out,
+      " Hyperparameter tuning was performed using ",
+      desc(x@tuner_config),
+      "."
+    )
+  }
+
+  # Metrics ----
+  if (type == "Classification") {
+    if (is.null(metric)) {
+      metric <- "balanced_accuracy"
+    }
+    check_character_scalar(metric)
+    available <- names(x@metrics_test@mean_metrics)
+    if (!metric %in% available) {
+      abort(
+        "metric must be one of the computed test metrics: ",
+        paste(available, collapse = ", "),
+        ".",
+        class = c("rtemis_value_error", "rtemis_input_error")
+      )
+    }
+    out <- paste(
+      out,
+      "Mean",
+      labelify(metric, toLower = TRUE),
+      "was",
+      ddSci(x@metrics_training@mean_metrics[[metric]]),
+      "in the training set and",
+      ddSci(x@metrics_test@mean_metrics[[metric]]),
+      "in the test set across "
+    )
+  } else if (type == "Regression") {
+    out <- paste(
+      out,
+      "Mean R-squared was",
+      ddSci(x@metrics_training@mean_metrics[["rsq"]]),
+      "on the training set and",
+      ddSci(x@metrics_test@mean_metrics[["rsq"]]),
+      "on the test set across "
+    )
+  }
+  out <- paste0(out, desc(x@outer_resampler), ".")
+  invisible(out)
+} # /rtemis::desc.SupervisedRes
+
+
+# %% describe.SupervisedRes ----
+#' Describe `SupervisedRes`
+#'
+#' @param x `SupervisedRes` object.
+#' @param ... Not used.
+#'
+#' @return Character string describing the `SupervisedRes` object, invisibly.
+#'
+#' @author EDG
+#' @noRd
+#'
+#' @examples
+#' mod <- train(iris, hyperparameters = setup_CART(), outer_resampling_config = setup_KFold())
+#' describe(mod)
+method(describe, SupervisedRes) <- function(x, verbosity = 1L) {
+  descx <- desc(x)
+  if (verbosity >= 1L) {
+    cat(descx, "\n")
+  }
+  invisible(descx)
+}
+
+
+# %% learning_curve_frame ----
+#' Assemble a learning curve in the shape every algorithm reports it in
+#'
+#' One row per step of training, whatever the algorithm calls a step. `unit`
+#' names it for the axis; `selected` is the step the fitted model kept, so a
+#' reader can see the curve and the choice made from it together.
+#'
+#' @param loss_training Optional Numeric vector: Training loss per step.
+#' @param loss_validation Optional Numeric vector: Validation loss per step.
+#' @param unit Character: What one step is -- "epochs", "leaves", ...
+#' @param selected Integer: The step the model kept.
+#'
+#' @return data.frame with `unit` and `selected` attributes.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+learning_curve_frame <- function(
+  loss_training = NULL,
+  loss_validation = NULL,
+  unit,
+  selected
+) {
+  n <- max(length(loss_training), length(loss_validation))
+  pad <- function(values) {
+    if (length(values) == 0L) rep(NA_real_, n) else as.numeric(values)
+  }
+  out <- data.frame(
+    iteration = seq_len(n),
+    loss_training = pad(loss_training),
+    loss_validation = pad(loss_validation)
+  )
+  attr(out, "unit") <- unit
+  attr(out, "selected") <- as.integer(selected)
+  out
+} # /rtemis::learning_curve_frame
+
+
+# %% get_learning_curve.Supervised ----
+method(get_learning_curve, Supervised) <- function(x) {
+  # Only algorithms that train in steps define `learning_curve_super()`.
+  # Anything else records no curve, so a missing method reads as NULL, as in
+  # `se()` above.
+  tryCatch(
+    learning_curve_super(model = x@model),
+    S7_error_method_not_found = function(e) NULL
+  )
+} # /rtemis::get_learning_curve.Supervised
+
+
+# %% make_SupervisedRes ----
+#' Make SupervisedRes
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+make_SupervisedRes <- function(
+  algorithm,
+  type,
+  models,
+  preprocessor_config,
+  decomposition_config,
+  hyperparameters,
+  tuner_config,
+  outer_resampler,
+  execution_config,
+  y_training,
+  y_test,
+  predicted_training,
+  predicted_test,
+  predicted_prob_training,
+  predicted_prob_test,
+  xnames = character(),
+  varimp = NULL,
+  question = character(),
+  data_fingerprint = NULL
+) {
+  if (type == "Classification") {
+    ClassificationRes(
+      algorithm = algorithm,
+      models = models,
+      preprocessor_config = preprocessor_config,
+      decomposition_config = decomposition_config,
+      hyperparameters = hyperparameters,
+      tuner_config = tuner_config,
+      outer_resampler = outer_resampler,
+      execution_config = execution_config,
+      y_training = y_training,
+      y_test = y_test,
+      predicted_training = predicted_training,
+      predicted_test = predicted_test,
+      predicted_prob_training = predicted_prob_training,
+      predicted_prob_test = predicted_prob_test,
+      xnames = xnames,
+      varimp = varimp,
+      question = question,
+      data_fingerprint = data_fingerprint
+    )
+  } else {
+    RegressionRes(
+      algorithm = algorithm,
+      models = models,
+      preprocessor_config = preprocessor_config,
+      decomposition_config = decomposition_config,
+      hyperparameters = hyperparameters,
+      tuner_config = tuner_config,
+      outer_resampler = outer_resampler,
+      execution_config = execution_config,
+      y_training = y_training,
+      y_test = y_test,
+      predicted_training = predicted_training,
+      predicted_test = predicted_test,
+      xnames = xnames,
+      varimp = varimp,
+      question = question,
+      data_fingerprint = data_fingerprint
+    )
+  }
+} # /rtemis::make_SupervisedRes
+
+early_stopping_algs <- c("LightGBM", "LightRF", "LightRuleFit", "LINAD", "MLP")
+
+
+# MLPModel ----
+#' MLPModel
+#'
+#' @description
+#' Class for MLP models: the fitted network's parameters plus everything needed
+#' to rebuild the architecture they belong to.
+#'
+#' A `torch` module holds external pointers, so it cannot be saved: an `.rds`
+#' written from one reloads as "external pointer is not valid" and fails at the
+#' first prediction. The parameters are therefore stored
+#' serialized, as an ordinary raw vector, and `predict_super()` rebuilds the
+#' module from the recorded architecture and loads them back in. Every
+#' architectural setting is recorded here, so the model is readable on its own.
+#'
+#' @author EDG
+#' @noRd
+MLPModel <- new_class(
+  name = "MLPModel",
+  package = "rtemis",
+  properties = list(
+    state = class_raw,
+    hidden_units = class_integer,
+    activation = class_character,
+    norm = NULL | class_character,
+    norm_first = class_logical,
+    bias = class_logical,
+    residual = class_logical,
+    dropout = class_numeric,
+    input_dropout = class_numeric,
+    embedding_dropout = class_numeric,
+    # The design frame's columns, split by how the module consumes them. Their
+    # order is the order the tensors are built in, so it is part of the fit.
+    numeric_features = class_character,
+    categorical_features = class_character,
+    embedding_sizes = class_integer,
+    embedding_dims = class_integer,
+    out_features = class_integer,
+    type = class_character,
+    y_levels = NULL | class_character,
+    device = class_character,
+    epochs_trained = class_integer,
+    best_epoch = class_integer,
+    history = class_data.frame
+  )
+) # /rtemis::MLPModel
+
+
+# LightRuleFit ----
+#' LightRuleFit
+#'
+#' @description
+#' Class for LightRuleFit models.
+#'
+#' @author EDG
+#' @noRd
+LightRuleFit <- new_class(
+  name = "LightRuleFit",
+  properties = list(
+    model_lightgbm = Supervised,
+    model_glmnet = Supervised,
+    rules = class_character,
+    rules_coefs = class_data.frame,
+    rules_index = class_integer,
+    rules_selected = class_character,
+    rules_selected_formatted = class_character,
+    rules_selected_formatted_coefs = class_data.frame,
+    y_levels = NULL | class_character,
+    xnames = class_character,
+    complexity_metrics = class_data.frame
+  )
+) # /rtemis::LightRuleFit
+
+
+# %% `$`.LightRuleFit ----
+method(`$`, LightRuleFit) <- function(x, name) {
+  prop_by_name(x, name)
+}
+
+
+# %% `.DollarNames`.LightRuleFit ----
+method(`.DollarNames`, LightRuleFit) <- function(x, pattern = "") {
+  prop_names_matching(x, pattern)
+}
+
+
+# %% `[[`.LightRuleFit ----
+method(`[[`, LightRuleFit) <- function(x, name) {
+  prop_by_name(x, name)
+}
+
+
+# ConditionalSuperLearner ----
+#' ConditionalSuperLearner
+#'
+#' @description
+#' Class for Conditional SuperLearner models: an oracle that routes each case to
+#' one of K experts, and the experts it routes to.
+#'
+#' @author EDG
+#' @noRd
+ConditionalSuperLearner <- new_class(
+  name = "ConditionalSuperLearner",
+  package = "rtemis",
+  properties = list(
+    # The experts, each refitted on the region the final oracle gave it.
+    experts = class_list,
+    # The K-class classifier over the covariates.
+    oracle = Supervised,
+    resampler = Resampler,
+    # Which expert the final oracle routes each training case to.
+    assignments = class_factor,
+    # Cases x experts: each expert's loss on each case, from a fit that did not
+    # see it. What the last oracle was fitted on.
+    cv_loss = class_matrix,
+    # The objective at each iteration; the paper's convergence claim is that
+    # this does not increase.
+    iteration_loss = class_numeric,
+    # Iterations x experts: how the partition moved.
+    region_sizes = class_matrix,
+    entry_features = class_list,
+    loss = class_character,
+    y_levels = NULL | class_character,
+    xnames = class_character,
+    type = class_character
+  )
+) # /rtemis::ConditionalSuperLearner
+
+
+# Print ConditionalSuperLearner ----
+method(print, ConditionalSuperLearner) <- function(x, ...) {
+  objcat("rtemis ConditionalSuperLearner Model")
+  cat(
+    highlight(length(x@experts)),
+    ngettext(length(x@experts), " expert", " experts"),
+    " routed by a ",
+    highlight(x@oracle@algorithm),
+    " oracle, over ",
+    length(x@iteration_loss),
+    ngettext(length(x@iteration_loss), " iteration", " iterations"),
+    ".\n",
+    sep = ""
+  )
+  cat(
+    "Final loss (",
+    x@loss,
+    "): ",
+    highlight(format(utils::tail(x@iteration_loss, 1L), digits = 4L)),
+    ".\n",
+    sep = ""
+  )
+  print(table(x@assignments, dnn = "Region sizes"))
+  invisible(x)
+} # /rtemis::print.ConditionalSuperLearner
+
+
+# StackedLearner ----
+#' StackedLearner
+#'
+#' @description
+#' Class for stacked meta learner models: SuperLearner and ModalityStacking.
+#'
+#' `level_one_training` and `resampler` are kept because they are what a
+#' cross-fitting estimator needs from a fitted ensemble: the out-of-fold
+#' predictions themselves, and the fold assignment that produced them, so a
+#' second nuisance model can be made to share it.
+#'
+#' @author EDG
+#' @noRd
+StackedLearner <- new_class(
+  name = "StackedLearner",
+  package = "rtemis",
+  properties = list(
+    # The library, refitted on the whole training set.
+    base_models = class_list,
+    # NULL for a discrete ensemble, which keeps one entry instead of combining.
+    meta_model = NULL | Supervised,
+    # Cases x entries: each entry's prediction of each case, from a fit that did
+    # not see it.
+    level_one_training = class_matrix,
+    resampler = Resampler,
+    # One row per entry: `learner`, `cv_risk`, `weight`.
+    cv_risk = class_data.table,
+    discrete_winner = NULL | class_character,
+    # One character vector per entry, fully resolved: for everything but modality
+    # stacking each is simply `xnames`.
+    entry_features = class_list,
+    y_levels = NULL | class_character,
+    xnames = class_character,
+    type = class_character,
+    # Whether the cross-validated risk was weighted by case weights.
+    case_weighted = class_logical
+  )
+) # /rtemis::StackedLearner
+
+
+# Print StackedLearner ----
+method(print, StackedLearner) <- function(x, ...) {
+  objcat("rtemis StackedLearner Model")
+  cat(
+    "Library of ",
+    highlight(length(x@base_models)),
+    ngettext(length(x@base_models), " entry", " entries"),
+    ", cross-fitted using ",
+    desc(x@resampler@config),
+    ".\n",
+    sep = ""
+  )
+  if (is.null(x@discrete_winner)) {
+    cat("Combined by ", highlight(x@meta_model@algorithm), ".\n", sep = "")
+  } else {
+    cat("Discrete: kept ", highlight(x@discrete_winner), ".\n", sep = "")
+  }
+  print(x@cv_risk)
+  invisible(x)
+} # /rtemis::print.StackedLearner
+
+
+# LinearAdditiveTree ----
+#' LinearAdditiveTree
+#'
+#' @description
+#' Class for LINAD models: a decision tree carrying a linear model at every
+#' node.
+#'
+#' Flat by design. `frame` holds one row per node and `coefficients` one row of
+#' coefficients per node, in place of a nested structure -- routing is then a
+#' vectorized pass per internal node, and the whole
+#' object serializes with no external references.
+#'
+#' A node's coefficients are the accumulated sum along its path, so prediction
+#' is one dot product per case. There is no separate initialization term: the
+#' root model's intercept is it.
+#'
+#' `frame[["node_value"]]` is what the **tree alone** predicts at a node -- the model
+#' with its slopes zeroed -- so the fit reads as a piecewise-constant tree plus a
+#' piecewise-linear correction, and the two parts can be shown separately. The
+#' root's is the constant that alone minimizes the loss; a child's is its
+#' parent's plus its own shrunk, line-searched constant.
+#'
+#' `steps[[k]]` holds the terminal node ids the tree had when it reached `k`
+#' leaves, which is what lets one grown tree be evaluated at any smaller size --
+#' the mechanism behind selecting the number of leaves on held-out data.
+#'
+#' @author EDG
+#' @noRd
+LinearAdditiveTree <- new_class(
+  name = "LinearAdditiveTree",
+  package = "rtemis",
+  properties = list(
+    frame = class_data.table,
+    coefficients = class_double,
+    steps = class_list,
+    n_leaves = class_integer,
+    # The features as `train()` saw them, and their levels, so the design matrix
+    # is rebuilt at predict time exactly as it was fitted.
+    xnames = class_character,
+    xlev = class_list,
+    # Which feature each design column came from, and its training spread.
+    # `varimp_super()` needs both: the first to fold a factor's dummy columns
+    # back into one feature, the second to compare coefficients across features
+    # measured on different scales.
+    design_assign = class_integer,
+    design_scale = class_double,
+    # The design's column names as fitted. Coefficients are applied by
+    # position, so prediction checks the rebuilt design against these rather
+    # than trusting that it produced the same basis.
+    design_names = class_character,
+    type = class_character,
+    y_levels = NULL | class_character,
+    # Every hyperparameter as the run resolved it, feature roles included.
+    # Several defaults exist only after resolution -- `n_cuts` is the clearest
+    # -- so a serialized fit that did not carry this would not record what
+    # produced it.
+    settings = class_list,
+    # Loss at every size the tree passed through, on the validation set and on
+    # the training set. The pair is what shows overfitting: one alone cannot.
+    leaf_curve = NULL | class_numeric,
+    training_curve = NULL | class_numeric
+  ),
+  validator = function(self) {
+    n_nodes <- NROW(self@frame)
+    if (NROW(self@coefficients) != n_nodes) {
+      return(paste0(
+        "@coefficients must have one row per node: ",
+        n_nodes,
+        " nodes, ",
+        NROW(self@coefficients),
+        " coefficient rows."
+      ))
+    }
+    if (NCOL(self@coefficients) != length(self@design_names)) {
+      return(paste0(
+        "@coefficients must have one column per design column: ",
+        length(self@design_names),
+        " design columns, ",
+        NCOL(self@coefficients),
+        " coefficient columns."
+      ))
+    }
+    if (length(self@design_assign) != length(self@design_names)) {
+      return("@design_assign must have one entry per design column.")
+    }
+    if (length(self@design_scale) != length(self@design_names)) {
+      return("@design_scale must have one entry per design column.")
+    }
+    # `design_assign` indexes `xnames`, with 0 at the intercept.
+    assigned <- self@design_assign[self@design_assign > 0L]
+    if (length(assigned) > 0L && max(assigned) > length(self@xnames)) {
+      return("@design_assign names a feature beyond @xnames.")
+    }
+    if (length(self@n_leaves) != 1L) {
+      return("@n_leaves must be a single value.")
+    }
+    if (self@n_leaves < 1L || self@n_leaves > length(self@steps)) {
+      return(paste0(
+        "@n_leaves must be a size the tree passed through, 1 to ",
+        length(self@steps),
+        "; got ",
+        self@n_leaves,
+        "."
+      ))
+    }
+    if (n_nodes > 0L) {
+      nodes <- self@frame[["node"]]
+      # Every id `steps` names has to exist, or selecting a size routes cases
+      # to a node that is not there.
+      unknown <- setdiff(unlist(self@steps, use.names = FALSE), nodes)
+      if (length(unknown) > 0L) {
+        return(paste0(
+          "@steps names node ids the frame does not have: ",
+          paste(unknown, collapse = ", "),
+          "."
+        ))
+      }
+      links <- unlist(
+        self@frame[, c("parent", "left", "right")],
+        use.names = FALSE
+      )
+      links <- links[!is.na(links)]
+      unknown <- setdiff(links, nodes)
+      if (length(unknown) > 0L) {
+        return(paste0(
+          "@frame links to node ids it does not have: ",
+          paste(unknown, collapse = ", "),
+          "."
+        ))
+      }
+    }
+    if (
+      !is.null(self@leaf_curve) && length(self@leaf_curve) != length(self@steps)
+    ) {
+      return("@leaf_curve must have one loss per size the tree passed through.")
+    }
+    if (
+      !is.null(self@training_curve) &&
+        length(self@training_curve) != length(self@steps)
+    ) {
+      return(
+        "@training_curve must have one loss per size the tree passed through."
+      )
+    }
+    NULL
+  }
+) # /rtemis::LinearAdditiveTree
+
+
+# Print LinearAdditiveTree ----
+method(print, LinearAdditiveTree) <- function(x, ...) {
+  objcat("rtemis Linear Additive Tree")
+  # The frame keeps every node grown; the selected size reaches only some of
+  # them, and those are the ones this model is.
+  terminal <- x@steps[[x@n_leaves]]
+  reachable <- linad_selected_nodes(x@frame, terminal)
+  n_nodes <- length(reachable)
+  cat(
+    "Tree of ",
+    highlight(x@n_leaves),
+    ngettext(x@n_leaves, " leaf", " leaves"),
+    " over ",
+    highlight(n_nodes),
+    ngettext(n_nodes, " node", " nodes"),
+    ", max depth ",
+    highlight(max(x@frame[["depth"]][reachable])),
+    ".\n",
+    sep = ""
+  )
+  cat(
+    "Each leaf carries a linear model over ",
+    highlight(ncol(x@coefficients) - 1L),
+    ngettext(ncol(x@coefficients) - 1L, " term", " terms"),
+    ".\n",
+    sep = ""
+  )
+  values <- x@frame[["node_value"]][match(terminal, x@frame[["node"]])]
+  cat(
+    "Node values span ",
+    highlight(ddSci(min(values))),
+    " to ",
+    highlight(ddSci(max(values))),
+    ".\n",
+    sep = ""
+  )
+  invisible(x)
+} # /rtemis::print.LinearAdditiveTree
+
+
+# LINADForest ----
+#' LINADForest
+#'
+#' @description
+#' Class for LINADForest models: a bagged ensemble of linear additive trees.
+#'
+#' Each tree is an ordinary `LinearAdditiveTree` holding its own feature subset
+#' in `@xnames`, so prediction is the mean over the trees' own `predict_super()`
+#' and the subsetting needs no code of its own.
+#'
+#' `bag_counts` -- how many times each training case appears in each bag -- is
+#' the one piece of training-set-sized state kept on the fitted model. The
+#' infinitesimal jackknife reads it, and there is no other way to reach a
+#' standard error of the fit; it costs `n * n_trees` integers.
+#'
+#' @author EDG
+#' @noRd
+LINADForest <- new_class(
+  name = "LINADForest",
+  package = "rtemis",
+  properties = list(
+    # `LinearAdditiveTree` objects, one per tree.
+    trees = class_list,
+    # Training cases x trees.
+    bag_counts = class_integer,
+    # One per training case, from the trees that did not hold it. NA for a case
+    # no tree left out.
+    oob_prediction = class_numeric,
+    oob_metrics = NULL | Metrics,
+    # The features as `train()` saw them: the union of what the trees hold.
+    xnames = class_character,
+    xlev = class_list,
+    type = class_character,
+    y_levels = NULL | class_character
+  ),
+  validator = function(self) {
+    n_trees <- length(self@trees)
+    not_trees <- !vapply(
+      self@trees,
+      function(tree) inherits(tree, "rtemis::LinearAdditiveTree"),
+      logical(1L)
+    )
+    if (any(not_trees)) {
+      return("@trees must all be LinearAdditiveTree objects.")
+    }
+    if (n_trees > 0L) {
+      if (NCOL(self@bag_counts) != n_trees) {
+        return(paste0(
+          "@bag_counts must have one column per tree: ",
+          n_trees,
+          " trees, ",
+          NCOL(self@bag_counts),
+          " columns."
+        ))
+      }
+      if (length(self@oob_prediction) != NROW(self@bag_counts)) {
+        return(paste0(
+          "@oob_prediction must have one value per training case: ",
+          NROW(self@bag_counts),
+          " cases, ",
+          length(self@oob_prediction),
+          " predictions."
+        ))
+      }
+      # A tree holds a `mtry_tree` subset, so its features are a subset of the
+      # forest's.
+      outside <- setdiff(
+        unlist(lapply(self@trees, function(tree) tree@xnames)),
+        self@xnames
+      )
+      if (length(outside) > 0L) {
+        return(paste0(
+          "@trees hold features the forest does not name: ",
+          paste(outside, collapse = ", "),
+          "."
+        ))
+      }
+    }
+    NULL
+  }
+) # /rtemis::LINADForest
+
+
+# Print LINADForest ----
+method(print, LINADForest) <- function(x, ...) {
+  objcat("rtemis LINADForest Model")
+  n_trees <- length(x@trees)
+  leaves <- vapply(x@trees, function(tree) tree@n_leaves, integer(1L))
+  cat(
+    "Forest of ",
+    highlight(n_trees),
+    ngettext(n_trees, " tree", " trees"),
+    ", ",
+    highlight(ddSci(mean(leaves))),
+    " leaves on average.\n",
+    sep = ""
+  )
+  if (is.null(x@oob_metrics)) {
+    cat("No out-of-bag estimate.\n")
+  } else {
+    cat("Out-of-bag:\n")
+    print(x@oob_metrics)
+  }
+  invisible(x)
+} # /rtemis::print.LINADForest
+
+
+# NNLS ----
+#' NNLS
+#'
+#' @description
+#' Class for non-negative least squares models.
+#'
+#' `nnls::nnls()` returns coefficients and nothing else -- no column names, no
+#' record of the outcome -- so everything `predict_super()` needs is carried
+#' here instead.
+#'
+#' @author EDG
+#' @noRd
+NNLS <- new_class(
+  name = "NNLS",
+  package = "rtemis",
+  properties = list(
+    # Named by `xnames`, non-negative, and summing to 1 when `normalize`.
+    coefficients = class_numeric,
+    xnames = class_character,
+    normalize = class_logical,
+    y_levels = NULL | class_character,
+    type = class_character
+  )
+) # /rtemis::NNLS
+
+
+# Print NNLS ----
+method(print, NNLS) <- function(x, ...) {
+  objcat("rtemis NNLS Model")
+  cat(
+    "Non-negative least squares over ",
+    highlight(length(x@xnames)),
+    ngettext(length(x@xnames), " predictor", " predictors"),
+    if (x@normalize) ", normalized to sum to 1" else "",
+    ".\n",
+    sep = ""
+  )
+  invisible(x)
+} # /rtemis::print.NNLS
+
+
+# Print LightRuleFit ----
+method(print, LightRuleFit) <- function(x, ...) {
+  objcat("rtemis LightRuleFit Model")
+  cat(
+    "Trained using ",
+    highlight(x@model_lightgbm@algorithm),
+    " and ",
+    highlight(x@model_glmnet@algorithm),
+    ".\n",
+    sep = ""
+  )
+  cat("Selected", highlight(length(x@rules_selected)), "rules.\n")
+  invisible(x)
+} # /rtemis::print.LightRuleFit
+
+
+# %% get_metric.Regression ----
+method(get_metric, Regression) <- function(x, set, metric) {
+  get_metrics(x, set)@metrics[[metric]]
+} # /rtemis::get_metric.Regression
+
+
+# %% get_metric.Classification ----
+method(get_metric, Classification) <- function(x, set, metric) {
+  get_metrics(x, set)@metrics[["overall"]][[metric]]
+} # /rtemis::get_metric.Classification
+
+
+# %% get_metric.RegressionRes ----
+method(get_metric, RegressionRes) <- function(x, set, metric) {
+  vapply(
+    get_metrics(x, set)@res_metrics,
+    function(r) r@metrics[[metric]],
+    numeric(1L)
+  )
+} # /rtemis::get_metric.RegressionRes
+
+
+# %% get_metric.ClassificationRes ----
+method(get_metric, ClassificationRes) <- function(x, set, metric) {
+  vapply(
+    get_metrics(x, set)@res_metrics,
+    function(r) r@metrics[["overall"]][[metric]],
+    numeric(1L)
+  )
+} # /rtemis::get_metric.ClassificationRes
+
+
+# %% stored_supervised_metrics ----
+#' Metrics stored on a supervised model for one sample
+#'
+#' Implements `get_metrics()` for `Supervised` and `SupervisedRes` models.
+#'
+#' @param x `Supervised` or `SupervisedRes` object.
+#' @param sample Optional Character: Sample name.
+#' @param calibrated Logical: If TRUE, read the calibrated metrics.
+#' @param samples Character: Samples the class of `x` can store.
+#'
+#' @return `Metrics` or `MetricsRes` object.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+stored_supervised_metrics <- function(x, sample, calibrated, samples) {
+  check_logical_scalar(calibrated)
+  suffix <- if (calibrated) "_calibrated" else ""
+  stored <- samples[vapply(
+    samples,
+    function(s) {
+      name <- paste0("metrics_", s, suffix)
+      prop_exists(x, name) && !is.null(prop(x, name))
+    },
+    logical(1L)
+  )]
+  class_name <- S7_class(x)@name
+  if (calibrated && length(stored) == 0L) {
+    abort(
+      "`calibrated = TRUE` requires a calibrated classifier; this is a ",
+      class_name,
+      " object. Use calibrate() to calibrate a Classification or ",
+      "ClassificationRes model.",
+      class = c("rtemis_value_error", "rtemis_input_error")
+    )
+  }
+  if (is.null(sample)) {
+    abort(
+      "`sample` is required for a ",
+      class_name,
+      " object. This object stores metrics for: ",
+      paste(encodeString(stored, quote = "'"), collapse = ", "),
+      ".",
+      class = c("rtemis_value_error", "rtemis_input_error")
+    )
+  }
+  check_character_scalar(sample)
+  if (!sample %in% samples) {
+    abort(
+      "`sample` must be one of ",
+      paste(encodeString(samples, quote = "'"), collapse = ", "),
+      " for a ",
+      class_name,
+      " object. Received: ",
+      encodeString(sample, quote = "'"),
+      ".",
+      class = c("rtemis_value_error", "rtemis_input_error")
+    )
+  }
+  if (!sample %in% stored) {
+    abort(
+      "This ",
+      class_name,
+      " object stores no ",
+      sample,
+      " metrics: train() received no `dat_",
+      sample,
+      "`. It stores metrics for: ",
+      paste(encodeString(stored, quote = "'"), collapse = ", "),
+      ".",
+      class = c("rtemis_value_error", "rtemis_input_error")
+    )
+  }
+  prop(x, paste0("metrics_", sample, suffix))
+} # /rtemis::stored_supervised_metrics
+
+
+# %% get_metrics.Supervised ----
+method(get_metrics, Supervised) <- function(
+  x,
+  sample = NULL,
+  calibrated = FALSE
+) {
+  stored_supervised_metrics(
+    x,
+    sample = sample,
+    calibrated = calibrated,
+    samples = c("training", "validation", "test")
+  )
+} # /rtemis::get_metrics.Supervised
+
+
+# %% get_metrics.SupervisedRes ----
+method(get_metrics, SupervisedRes) <- function(
+  x,
+  sample = NULL,
+  calibrated = FALSE
+) {
+  stored_supervised_metrics(
+    x,
+    sample = sample,
+    calibrated = calibrated,
+    samples = c("training", "test")
+  )
+} # /rtemis::get_metrics.SupervisedRes
+
+
+# Describe list of Supervised/Res ----
+#' Describe multiple Supervised or SupervisedRes objects
+#'
+#' @param x List of `Supervised` or `SupervisedRes` objects.
+#' @param metric Character: Metric to use for description. If NULL, uses "balanced_accuracy" for Classification and "rsq" for Regression.
+#' @param decimal_places Integer: Number of decimal places to round metrics to.
+#' @param output_type Character {"ansi", "html", or "plain"}: Output type.
+#'
+#' @author EDG
+#'
+#' @keywords internal
+#' @noRd
+method(desc, class_list) <- function(
+  x,
+  metric = NULL,
+  decimal_places = 3L,
+  output_type = NULL
+) {
+  # Check all elements are Supervised or all are SupervisedRes objects
+  if (
+    !all(sapply(x, S7_inherits, Supervised)) &&
+      !all(sapply(x, S7_inherits, SupervisedRes))
+  ) {
+    rtemis.core::abort(
+      "All elements must be either Supervised or SupervisedRes objects.",
+      class = c("rtemis_type_error", "rtemis_input_error")
+    )
+  }
+  type <- if (S7_inherits(x[[1]], SupervisedRes)) {
+    "SupervisedRes"
+  } else {
+    "Supervised"
+  }
+
+  # Check that all models are of the same type
+  if (!all(sapply(x, function(m) m@type == x[[1]]@type))) {
+    rtemis.core::abort(
+      "All objects must be of the same supervised learning type (Classification or Regression).",
+      class = c("rtemis_value_error", "rtemis_input_error")
+    )
+  }
+
+  # Name list using algorithm names
+  if (is.null(names(x))) {
+    names(x) <- sapply(x, function(m) m@algorithm)
+  }
+  suptype <- x[[1]]@type
+
+  # SupervisedRes
+  if (type == "SupervisedRes") {
+    # Check that the same resampling method was used - ideally same seed, but do not enforce that, but report it
+    # Get resampling config from each
+    res_params <- lapply(x, function(m) m@outer_resampler@config)
+    # Check all resamplers of same type
+    if (!all(sapply(res_params, function(p) p@type == res_params[[1]]@type))) {
+      rtemis.core::warn(
+        "All SupervisedRes objects must use the same resampling method."
+      )
+    }
+    # ?replace with loop that checks all resampler params
+    # Check all resamplers use same n
+    if (
+      !all(sapply(res_params, function(p) {
+        p@n_resamples == res_params[[1]]@n_resamples
+      }))
+    ) {
+      rtemis.core::warn(
+        "All SupervisedRes objects must use the same number of resamples."
+      )
+    }
+
+    # Describe SupervisedRes objects
+    # 1. Report names of algorithms used.
+    out <- paste0(
+      oxfordcomma(sapply(x, function(m) desc_abb_alg(m@algorithm))),
+      " were used for ",
+      suptype,
+      ".\n"
+    )
+    # 2. Get metric
+    if (is.null(metric)) {
+      metric <- if (suptype == "Classification") {
+        "balanced_accuracy"
+      } else {
+        "rsq"
+      }
+    }
+    metricv <- sapply(x, function(m) m@metrics_test@mean_metrics[[metric]])
+  } # /SupervisedRes
+  if (type == "Supervised") {
+    # 1. Report names of algorithms used.
+    out <- paste0(
+      oxfordcomma(sapply(x, function(m) desc_abb_alg(m@algorithm))),
+      " were used for ",
+      suptype,
+      ".\n"
+    )
+    # 2. Get metric
+    if (is.null(metric)) {
+      metric <- if (suptype == "Classification") {
+        "balanced_accuracy"
+      } else {
+        "rsq"
+      }
+    }
+    if (suptype == "Classification") {
+      # Classification
+      metricv <- sapply(x, function(m) {
+        m@metrics_test@metrics[["overall"]][[metric]]
+      })
+    } else {
+      # Regression
+      metricv <- sapply(x, function(m) m@metrics_test@metrics[[metric]])
+    }
+  } # /rtemis::Supervised
+
+  # 3. Report mean metric across all models, sorting by performance
+  metric_sorted <- sort(metricv, decreasing = TRUE)
+  # => Get ties at specified decimal_places
+  out <- paste0(
+    out,
+    "The top-performing model was ",
+    bold(names(metric_sorted)[1], output_type = output_type),
+    " with a test-set ",
+    bold(labelify(metric), output_type = output_type),
+    " of ",
+    bold(
+      ddSci(metric_sorted[1], decimal_places = decimal_places),
+      output_type = output_type
+    ),
+    ", followed by ",
+    oxfordcomma(names(metric_sorted[-1])),
+    " with ",
+    metric,
+    " of ",
+    oxfordcomma(ddSci(metric_sorted[-1], decimal_places = decimal_places)),
+    " respectively."
+  )
+  out
+} # /rtemis::desc.list
+
+
+# %% describe.list(Supervised/Res) ----
+#' Print description of a list of Supervised or SupervisedRes objects
+#'
+#' @param x List of `Supervised` or `SupervisedRes` objects.
+#' @param ... See details.
+#'
+#' @details
+#' Extra arguments:
+#' - `metric`: Character: Metric to use for description. If NULL, uses "balanced_accuracy" for Classification and "rsq" for Regression.
+#' - `decimal_places`: Integer: Number of decimal places to round metrics to.
+#' - `output_type`: Character {"ansi", "html", or "plain"}: Output type.
+#'
+#' @return Character of description invisibly. Prints description to output.
+#'
+#' @author EDG
+#'
+#' @keywords internal
+#' @noRd
+method(describe, class_list) <- function(
+  x,
+  metric = NULL,
+  decimal_places = 3L,
+  output_type = NULL,
+  verbosity = 1L,
+  ...
+) {
+  out <- desc(
+    x,
+    metric = metric,
+    decimal_places = decimal_places,
+    output_type = output_type
+  )
+  if (verbosity >= 1L) {
+    cat(out, "\n")
+  }
+  invisible(out)
+} # /rtemis::describe.list(Supervised/Res)
+
+
+# %% get_varimp.Supervised ----
+method(get_varimp, Supervised) <- function(x) {
+  x@varimp
+} # /rtemis::get_varimp.Supervised
+
+# %% get_varimp.SupervisedRes ----
+method(get_varimp, SupervisedRes) <- function(x) {
+  x@varimp
+} # /rtemis::get_varimp.SupervisedRes

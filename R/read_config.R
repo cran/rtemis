@@ -15,15 +15,19 @@
 #' The config family is taken from the instance's `$schema`, which must be one of
 #' the supported schemas; a missing or unrecognized `$schema` is an error.
 #'
-#' When the `rtemis` CLI is on the `PATH`, the file is additionally validated
-#' against its vendored schema.rtemis.org JSON Schema before reconstruction, so
-#' structural problems (unknown fields, wrong nesting, missing required values)
-#' are caught up front with schema-path errors. Without the CLI, the `setup_*`
-#' functions remain the backstop, validating field values during reconstruction.
-#' Control this with `options(rtemis.validate = )`: `"auto"` (default) uses the
-#' CLI when present and skips it otherwise, `"always"` errors if the CLI is
-#' missing, `"never"` skips the gate. The CLI binary can be overridden with
-#' `options(rtemis.cli = )`.
+#' A **run record** is rejected, and named as such. A record declares the same
+#' fields as the config it came from, so it would read as one -- but every value
+#' in it is resolved, including values a run derived from data this call has
+#' never seen. Accepting it would silently pin settings the new call should
+#' decide for itself. Records are written by [write_record] and identify
+#' themselves with a `record.json` schema.
+#'
+#' Validation is entirely rtemis's own: `check_wire_keys()` rejects an unknown
+#' key at every level of the document, and each `setup_*` then constructs an S7
+#' object whose properties enforce their declared types, bounds, enums and
+#' arities. Those properties are the same `PropertySpec`s the published JSON
+#' Schemas are generated from, so reading a config in R applies the published
+#' contract by construction -- there is nothing an external validator could add.
 #'
 #' @param file Character: Path to input JSON config file.
 #'
@@ -32,12 +36,10 @@
 #'
 #' @author EDG
 #' @export
-#'
 #' @examples
 #' # Create a SuperConfig object
 #' x <- setup_SuperConfig(
 #'   dat_training_path = "~/Data/iris.csv",
-#'   algorithm = "LightRF",
 #'   hyperparameters = setup_LightRF()
 #' )
 #' # Write JSON config file
@@ -58,103 +60,270 @@ read_config <- function(file) {
     simplifyDataFrame = FALSE,
     simplifyMatrix = FALSE
   )
-  kind <- .detect_config_kind(xl)
-  # Full-document schema validation via the `rtemis` CLI, when available.
-  .validate_config_cli(file)
-  switch(
-    kind,
-    supervised = .list_to_SuperConfig(xl),
-    decompose = .list_to_DecomposeConfig(xl),
-    cluster = .list_to_ClusterConfig(xl),
-    decomposition = .list_to_DecompositionConfig(xl),
-    clustering = .list_to_ClusteringConfig(xl),
-    rtemis.core::abort(
-      "Unknown config kind: ",
-      kind,
-      ". Expected 'supervised', 'decompose', 'cluster', 'decomposition', or ",
-      "'clustering'.",
-      class = c("rtemis_value_error", "rtemis_input_error")
-    )
-  )
+  .config_from_list(xl)
 } # /rtemis::read_config
 
 
-# %% .validate_config_cli ----
-#' Validate a config file against its schema using the `rtemis` CLI
+# %% .config_from_list ----
+#' Reconstruct an rtemis config object from a parsed config list
 #'
-#' Opportunistic full-document JSON Schema validation. Policy is read from
-#' `getOption("rtemis.validate", "auto")`:
-#' - `"auto"`: validate if the CLI is found, skip silently otherwise.
-#' - `"always"`: validate, erroring if the CLI is missing.
-#' - `"never"`: skip entirely.
+#' The reconstruction half of [read_config], separated from the file half so
+#' that a config arriving as a list -- over the wire, or from a caller that
+#' already parsed the JSON -- goes through the same route as one read from
+#' disk. There is deliberately no second validation path: whatever
+#' [read_config] accepts, this accepts, and whatever it rejects, this rejects
+#' with the same condition.
 #'
-#' The CLI binary is resolved from `getOption("rtemis.cli", "rtemis")`. On a
-#' validation failure the schema errors are surfaced via [rtemis.core::abort];
-#' a CLI that is present but misbehaves degrades to a warning under `"auto"` so a
-#' flaky binary never blocks a legitimate read.
+#' @param x Named list parsed from a config document, carrying a `$schema`.
 #'
-#' @param file Character: Path to the JSON config file (already sanitized).
-#'
-#' @return `invisible(NULL)`, called for its side effect (error on invalid).
+#' @return A `SuperConfig`, `DecomposeConfig`, `ClusterConfig`,
+#'   `DecompositionConfig`, `ClusteringConfig`, or `PreprocessorConfig` object.
 #'
 #' @author EDG
 #' @keywords internal
 #' @noRd
-.validate_config_cli <- function(file) {
-  policy <- match.arg(
-    getOption("rtemis.validate", "auto"),
-    c("auto", "always", "never")
-  )
-  if (policy == "never") {
-    return(invisible(NULL))
-  }
-  cli <- Sys.which(getOption("rtemis.cli", "rtemis"))[[1L]]
-  if (!nzchar(cli)) {
-    if (policy == "always") {
-      rtemis.core::abort(
-        "`rtemis` CLI not found but `options(rtemis.validate = \"always\")` ",
-        "requires it for schema validation.",
-        class = c("rtemis_dependency_error", "rtemis_runtime_error")
-      )
-    }
-    return(invisible(NULL))
-  }
-  out <- suppressWarnings(
-    system2(
-      cli,
-      c("validate", "--json", shQuote(file)),
-      stdout = TRUE,
-      stderr = FALSE
-    )
-  )
-  report <- tryCatch(
-    jsonlite::fromJSON(paste(out, collapse = "\n"), simplifyVector = FALSE),
-    error = function(e) NULL
-  )
-  result <- if (is.list(report) && length(report[["results"]]) >= 1L) {
-    report[["results"]][[1L]]
-  } else {
-    NULL
-  }
-  if (is.null(result)) {
-    msg <- paste0("Could not parse `rtemis validate` output for ", file, ".")
-    if (policy == "always") {
-      rtemis.core::abort(
-        msg,
-        class = c("rtemis_runtime_error")
-      )
-    }
-    rtemis.core::warn(msg, " Falling back to `setup_*` validation.")
-    return(invisible(NULL))
-  }
-  if (!isTRUE(result[["valid"]])) {
+.config_from_list <- function(x) {
+  kind <- .detect_config_kind(x)
+  switch(
+    kind,
+    supervised = .list_to_SuperConfig(x),
+    decompose = .list_to_DecomposeConfig(x),
+    cluster = .list_to_ClusterConfig(x),
+    decomposition = .list_to_DecompositionConfig(x),
+    clustering = .list_to_ClusteringConfig(x),
+    ingest = .list_to_IngestConfig(x),
+    partition = .list_to_PartitionConfig(x),
+    preprocessor = .list_to_PreprocessorConfig(x),
+    supervisedpreprocessor = .list_to_SupervisedPreprocessorConfig(x),
     rtemis.core::abort(
-      "Config failed schema validation against ",
-      result[["schema"]],
-      ":\n",
-      paste0("  - ", unlist(result[["errors"]]), collapse = "\n"),
+      "Unknown config kind: ",
+      kind,
+      ". Expected 'supervised', 'decompose', 'cluster', 'decomposition', ",
+      "'clustering', 'ingest', 'partition', 'preprocessor', or ",
+      "'supervisedpreprocessor'.",
       class = c("rtemis_value_error", "rtemis_input_error")
     )
+  )
+} # /rtemis::.config_from_list
+
+
+# %% .drop_meta_keys ----
+#' Drop JSON document metadata keys from a parsed config list
+#'
+#' Every schema.rtemis.org config declares a `$schema`, and so may a nested one:
+#' the family schemas (preprocessor, execution, decomposition, clustering, ...)
+#' all permit `$schema`, so a `preprocessor_config` lifted verbatim out of a
+#' standalone preprocessor config file carries its own. Those `$`-prefixed keys
+#' are document metadata, not `setup_*` arguments, so they are stripped before a
+#' parsed list is forwarded via `do.call()`. Anything else unknown still reaches
+#' the `setup_*` function and fails there.
+#'
+#' Exported for `rtemis.server`, which applies the same rule to the config
+#' blocks it receives over the wire.
+#'
+#' @param x Named list parsed from JSON, or `NULL`.
+#'
+#' @return `x` without its `$`-prefixed elements.
+#'
+#' @author EDG
+#' @keywords internal
+#' @export
+#' @examples
+#' .drop_meta_keys(list(`$schema` = "https://schema.rtemis.org/preprocessor/r/v1/schema.json",
+#'                      remove_duplicates = TRUE))
+.drop_meta_keys <- function(x) {
+  if (is.null(names(x))) {
+    return(x)
   }
-  invisible(NULL)
-} # /rtemis::.validate_config_cli
+  x[!startsWith(names(x), "$")]
+} # /rtemis::.drop_meta_keys
+
+
+# %% check_is_S7 ----
+#' Check that a value is an instance of a given S7 class
+#'
+#' Guards an argument documented as one S7 class before it is used as one,
+#' across the package (`train()`, `tune()`, `resample()`, `preprocess()`,
+#' `decomp()`, `cluster()`, `explain()`, `draw_linad()`, and more). Uses
+#' `S7_inherits()`: every call site passes an S7 class *object* (`IngestConfig`,
+#' `rtemis.draw::Theme`, ...) as `cls`, and base R's `inherits()`, which
+#' `rtemis.core::check_inherits()` wraps, expects a character class name.
+#'
+#' @param x Object to check.
+#' @param cls S7 class object to check against.
+#' @param allow_null Logical: If TRUE, NULL values are allowed and return early.
+#' @param arg_name Character: Name of the variable for error messages.
+#'
+#' @return Called for side effects. Throws an error if the check fails.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+check_is_S7 <- function(
+  x,
+  cls,
+  allow_null = TRUE,
+  arg_name = deparse(substitute(x))
+) {
+  if (allow_null && is.null(x)) {
+    return(invisible())
+  }
+  if (is.null(x)) {
+    rtemis.core::abort(
+      "`",
+      arg_name,
+      "` cannot be NULL.",
+      class = c("rtemis_null_input", "rtemis_input_error")
+    )
+  }
+  if (!S7_inherits(x, cls)) {
+    rtemis.core::abort(
+      "`",
+      arg_name,
+      "` must be a `",
+      cls@name,
+      "` object.",
+      class = c("rtemis_type_error", "rtemis_input_error")
+    )
+  }
+  invisible()
+} # /rtemis::check_is_S7
+
+
+# %% check_no_settings_key ----
+#' Refuse settings nested under a key below the discriminator
+#'
+#' Every dispatched family serializes its settings as siblings of the
+#' discriminator: `{"algorithm": "Ranger", "num_trees": 500}`. A document that
+#' nests them -- `{"algorithm": "Ranger", "hyperparameters": {...}}`, the shape
+#' these families once had -- would otherwise be refused by `check_wire_keys()`
+#' as an unknown key, which names the symptom where this names the fix.
+#'
+#' @param x Named list parsed from the wire.
+#' @param key Character: The retired settings key (`"hyperparameters"`,
+#'   `"config"`).
+#' @param discriminator Character: The family's discriminator (`"algorithm"`,
+#'   `"type"`).
+#' @param label Character: The config's name, for the error message.
+#'
+#' @return `x`, invisibly. Throws if `key` is present.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+check_no_settings_key <- function(x, key, discriminator, label) {
+  if (!key %in% names(x)) {
+    return(invisible(x))
+  }
+  rtemis.core::abort(
+    "`",
+    key,
+    "` is not a ",
+    label,
+    " key: settings are siblings of `",
+    discriminator,
+    "`, not nested under `",
+    key,
+    "`. Move each entry of `",
+    key,
+    "` up beside `",
+    discriminator,
+    "` and drop `",
+    key,
+    "`.",
+    class = c("rtemis_value_error", "rtemis_input_error")
+  )
+} # /rtemis::check_no_settings_key
+
+
+# %% check_wire_keys ----
+#' Reject wire keys a config does not declare
+#'
+#' Every `.list_to_*()` reconstructor calls this before building its object, so
+#' a mistyped or stale key is named in an error: a dropped key would leave a
+#' config that looks accepted but trains something else. One check for every
+#' family gives one message, which names the config and the intended key.
+#'
+#' `$`-prefixed metadata is always allowed: it identifies the document, not a
+#' field, and `.drop_meta_keys()` removes it downstream.
+#'
+#' @param x Named list parsed from the wire.
+#' @param valid Character: Keys this config declares.
+#' @param label Character: The config's name, for the error message.
+#'
+#' @return `x`, invisibly. Throws if any key is unknown.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+check_wire_keys <- function(x, valid, label) {
+  nms <- names(x)
+  if (is.null(nms)) {
+    return(invisible(x))
+  }
+  unknown <- setdiff(nms[nzchar(nms)], c(valid, nms[startsWith(nms, "$")]))
+  if (length(unknown) == 0L) {
+    return(invisible(x))
+  }
+  rtemis.core::abort(
+    "Unknown ",
+    label,
+    if (length(unknown) == 1L) " key: " else " keys: ",
+    paste0("`", unknown, "`", nearest_hint(unknown, valid), collapse = ", "),
+    ".",
+    class = c("rtemis_value_error", "rtemis_input_error")
+  )
+} # /rtemis::check_wire_keys
+
+
+# %% nearest_hint ----
+#' " (did you mean `x`?)" for each unknown key with a near-miss among `valid`
+#'
+#' A typo and a renamed field look identical to a reader of the error, so the
+#' suggestion is what turns "unknown key" into a fix. Two things qualify as a
+#' near miss: a small edit distance (`maxdept` -> `maxdepth`), and a prefix
+#' relation, which is what an abbreviation or a rename-by-extension looks like
+#' (`n` -> `n_resamples`, the historical resampler rename). Edit distance alone
+#' misses that one, being 10 apart on a one-character key.
+#'
+#' A wrong-but-plausible name (`train_p` on a KFold) matches neither and gets no
+#' misleading suggestion.
+#'
+#' @param unknown Character: The offending keys.
+#' @param valid Character: Keys this config declares.
+#'
+#' @return Character, same length as `unknown`; empty strings where nothing is
+#'   close enough.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+nearest_hint <- function(unknown, valid) {
+  if (length(valid) == 0L) {
+    return(rep("", length(unknown)))
+  }
+  vapply(
+    unknown,
+    function(key) {
+      prefix <- startsWith(valid, key) | startsWith(key, valid)
+      if (any(prefix)) {
+        # Shortest match: `n` should reach `n_resamples`, not a longer name that
+        # merely shares the prefix.
+        return(paste0(
+          " (did you mean `",
+          valid[prefix][[which.min(nchar(valid[prefix]))]],
+          "`?)"
+        ))
+      }
+      d <- utils::adist(key, valid, ignore.case = TRUE)[1L, ]
+      # A third of the key's length, so short names need a closer match than
+      # long ones and an unrelated name never suggests anything.
+      if (min(d) > max(1L, floor(nchar(key) / 3L))) {
+        return("")
+      }
+      paste0(" (did you mean `", valid[[which.min(d)]], "`?)")
+    },
+    character(1L),
+    USE.NAMES = FALSE
+  )
+} # /rtemis::nearest_hint

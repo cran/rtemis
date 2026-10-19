@@ -5,28 +5,325 @@
 # library(testthat)
 
 # %% ExecutionConfig ----
-ec <- ExecutionConfig(
-  backend = "future",
+# `backend` selects the variant and is a computed constant on each, so a
+# variant is constructed directly rather than by naming the backend.
+ec <- FutureExecutionConfig(
   n_workers = 4L,
   future_plan = "multisession"
 )
 ec
-testthat::test_that("ExecutionConfig() works", {
+testthat::test_that("the execution variants build and share the base", {
+  expect_s7_class(ec, ExecutionConfig)
+  expect_s7_class(ec, ParallelExecutionConfig)
+  expect_identical(ec@backend, "future")
+  expect_s7_class(SerialExecutionConfig(), ExecutionConfig)
+  expect_identical(SerialExecutionConfig()@backend, "none")
+  expect_identical(MiraiExecutionConfig()@backend, "mirai")
+  # A variant declares only what its backend acts on. Serial dispatches
+  # nothing, so a worker pool and the two dispatch levels are not properties it
+  # has -- there is nothing to reject, because there is nothing to set. (S7
+  # drops an unknown constructor argument silently, so the property set is what
+  # says this, not an error.)
+  expect_named(
+    props(SerialExecutionConfig()),
+    c(
+      "backend",
+      "n_workers_algorithm",
+      "device",
+      "on_error",
+      "seed",
+      "shared_memory"
+    )
+  )
+  expect_false("future_plan" %in% names(props(MiraiExecutionConfig())))
+  expect_true("future_plan" %in% names(props(FutureExecutionConfig())))
+  # Only rtemis-owned mirai daemons persist for the run, so only that variant
+  # can load rtemis in each worker ahead of its first task.
+  expect_true("warm_workers" %in% names(props(MiraiExecutionConfig())))
+  expect_false("warm_workers" %in% names(props(FutureExecutionConfig())))
+  expect_false("warm_workers" %in% names(props(SerialExecutionConfig())))
+  # The base is abstract: a backend is not a setting on one flat class.
+  expect_error(ExecutionConfig())
+})
+
+# %% setup_FutureExecution() ----
+ec <- setup_FutureExecution(
+  n_workers = 4L,
+  future_plan = "multisession"
+)
+testthat::test_that("setup_FutureExecution() works", {
   expect_s7_class(
     ec,
     ExecutionConfig
   )
 })
 
-# %% setup_ExecutionConfig() ----
-ec <- setup_ExecutionConfig(
-  backend = "future",
-  n_workers = 4L,
-  future_plan = "multisession"
-)
-testthat::test_that("setup_ExecutionConfig() works", {
-  expect_s7_class(
-    ec,
-    ExecutionConfig
+
+# %% seed ----
+testthat::test_that("setup_FutureExecution() keeps an explicit seed", {
+  expect_identical(
+    setup_SerialExecution(seed = 2026L)@seed,
+    2026L
+  )
+})
+
+testthat::test_that("setup_FutureExecution() resolves a seed when none is given", {
+  # An unseeded run must still be reproducible, so a seed is drawn and recorded rather
+  # than left NULL for the run to improvise.
+  ec_unseeded <- setup_SerialExecution()
+  expect_type(ec_unseeded@seed, "integer")
+  expect_false(is.null(ec_unseeded@seed))
+})
+
+testthat::test_that("the drawn seed comes from the caller's RNG stream", {
+  # Which is what keeps `set.seed(x); train(...)` deterministic without an explicit seed.
+  set.seed(2026L)
+  first <- setup_SerialExecution()@seed
+  set.seed(2026L)
+  expect_identical(setup_SerialExecution()@seed, first)
+})
+
+
+# %% per-level workers ----
+# Three levels can absorb workers. Left alone one is chosen by priority; named, the
+# caller's choice replaces that entirely.
+
+testthat::test_that("unset levels leave the ladder in charge", {
+  ec <- setup_MiraiExecution(n_workers = 4L)
+  expect_null(ec@n_workers_outer)
+  expect_null(ec@n_workers_tuning)
+  expect_null(ec@n_workers_algorithm)
+})
+
+
+testthat::test_that("n_workers follows the dispatch levels when they are named", {
+  ec <- setup_MiraiExecution(
+    n_workers_outer = 4L,
+    n_workers_algorithm = 2L
+  )
+  # The pool is sized by the level that dispatches; algorithm workers are threads inside
+  # a worker and add none of their own.
+  expect_identical(ec@n_workers, 4L)
+  expect_identical(ec@n_workers_algorithm, 2L)
+})
+
+
+testthat::test_that("algorithm threads need no backend", {
+  # Threads run in the calling process, so there is nothing to dispatch to.
+  ec <- setup_SerialExecution(n_workers_algorithm = 8L)
+  expect_identical(ec@n_workers_algorithm, 8L)
+})
+
+
+testthat::test_that("two parallel dispatch levels are rejected", {
+  # An outer fold runs in a worker process and cannot dispatch again from inside one.
+  expect_error(
+    setup_MiraiExecution(
+      n_workers_outer = 2L,
+      n_workers_tuning = 4L
+    ),
+    "Only one dispatch level"
+  )
+})
+
+
+testthat::test_that("a serial config offers no dispatch level to set", {
+  # Unrepresentable rather than rejected: `setup_SerialExecution()` has no such
+  # formal, and the published leaf declares no such property, so the dispatcher's
+  # `unevaluatedProperties` rejects a document that carries one.
+  expect_false("n_workers_outer" %in% names(formals(setup_SerialExecution)))
+  expect_false("n_workers" %in% names(formals(setup_SerialExecution)))
+  expect_error(setup_SerialExecution(n_workers_outer = 4L), "unused argument")
+  expect_error(
+    rtemis:::.list_to_ExecutionConfig(list(backend = "none", n_workers = 1L)),
+    "cannot carry"
+  )
+})
+
+
+testthat::test_that("only a mirai config carries warm_workers", {
+  expect_false("warm_workers" %in% names(formals(setup_FutureExecution)))
+  expect_false("warm_workers" %in% names(formals(setup_SerialExecution)))
+  for (backend in c("none", "future")) {
+    expect_error(
+      rtemis:::.list_to_ExecutionConfig(list(
+        backend = backend,
+        warm_workers = TRUE
+      )),
+      "cannot carry"
+    )
+  }
+  testthat::skip_if_not_installed("mirai")
+  expect_false(
+    setup_MiraiExecution(n_workers = 2L, warm_workers = FALSE)@warm_workers
+  )
+  expect_error(
+    setup_MiraiExecution(n_workers = 2L, warm_workers = "yes"),
+    class = "rtemis_type_error"
+  )
+})
+
+
+testthat::test_that("named levels reach the run, and compose", {
+  skip_ci_parallel_integration()
+  testthat::skip_on_cran()
+  testthat::skip_if_not_installed("mirai")
+  testthat::skip_if_not_installed("ranger")
+  set.seed(2026L)
+  n <- 400L
+  x <- data.frame(matrix(stats::rnorm(n * 8L), n, 8L))
+  x[["y"]] <- factor(ifelse(x[["X1"]] + stats::rnorm(n) > 0, "yes", "no"))
+  mod <- train(
+    x,
+    hyperparameters = setup_Ranger(num_trees = 50L),
+    outer_resampling_config = setup_KFold(
+      n_resamples = 4L,
+      seed = 1L
+    ),
+    execution_config = setup_MiraiExecution(
+      n_workers_outer = 4L,
+      n_workers_algorithm = 2L,
+      seed = 2026L
+    ),
+    verbosity = 0L
+  )
+  # Four folds dispatched to four processes, each fitting with two threads. The threads
+  # have to survive the hop into the worker, which is the part a sequential fold config
+  # would silently drop.
+  expect_identical(
+    unname(vapply(
+      mod@models,
+      function(m) m@hyperparameters@n_workers,
+      integer(1L)
+    )),
+    rep(2L, 4L)
+  )
+})
+
+
+testthat::test_that("a level that cannot run is clamped, not obeyed", {
+  # The same config is reasonably pointed at data that tunes and data that does not.
+  workers <- getFromNamespace("get_n_workers", "rtemis")(
+    algorithm = "CART",
+    hyperparameters = setup_CART(),
+    outer_resampling_config = NULL,
+    n_workers = 1L,
+    n_workers_tuning = 8L,
+    verbosity = 0L
+  )
+  expect_identical(workers[["tuning"]], 1L)
+})
+
+
+testthat::test_that("a CRAN check resolves the default worker count to at most two", {
+  # Every self-parallelizing learner, libtorch's included, threads with the
+  # workers resolved from `default_n_workers()` unless told otherwise, and CRAN
+  # allows two cores. `availableCores()` reads `_R_CHECK_LIMIT_CORES_`, which a
+  # CRAN check sets.
+  withr::local_envvar(`_R_CHECK_LIMIT_CORES_` = "TRUE")
+  expect_lte(getFromNamespace("default_n_workers", "rtemis")(), 2L)
+})
+
+
+testthat::test_that("the resources line states device, backend, ceiling and every level", {
+  # One line is the whole account of what a run may use; a level or the device
+  # missing from it is a resource the log cannot answer for.
+  resources_line <- function(...) {
+    paste(
+      gsub(
+        "\\033\\[[0-9;]*m",
+        "",
+        testthat::capture_messages(
+          getFromNamespace("get_n_workers", "rtemis")(
+            algorithm = "CART",
+            hyperparameters = setup_CART(),
+            outer_resampling_config = NULL,
+            verbosity = 1L,
+            ...
+          )
+        )
+      ),
+      collapse = ""
+    )
+  }
+  expect_match(
+    resources_line(
+      n_workers = 3L,
+      backend = "mirai",
+      device = "MPS (auto-selected)"
+    ),
+    "// MPS (auto-selected) | mirai | 3 workers: algorithm 1 thread, tuning 1, outer resampling 1",
+    fixed = TRUE
+  )
+  explicit <- resources_line(n_workers = 1L, n_workers_algorithm = 2L)
+  expect_match(
+    explicit,
+    "// CPU | serial | 1 worker: algorithm 1 thread, tuning 1, outer resampling 1 (as set)",
+    fixed = TRUE
+  )
+})
+
+
+# %% Device ----
+testthat::test_that("a device is written as a type name or an object and stored as the object", {
+  shortcut <- setup_SerialExecution(device = "mps", seed = 1L)
+  testthat::expect_s7_class(shortcut@device, MPSDeviceConfig)
+  explicit <- setup_SerialExecution(
+    device = setup_CUDA(ids = c(1L, 0L)),
+    seed = 1L
+  )
+  testthat::expect_identical(explicit@device@ids, c(1L, 0L))
+  testthat::expect_null(setup_SerialExecution(seed = 1L)@device)
+  testthat::expect_error(
+    setup_SerialExecution(device = "tpu", seed = 1L),
+    class = "rtemis_value_error"
+  )
+  # GPU ids exist only on a CUDA device, are zero-based and distinct.
+  testthat::expect_error(setup_CUDA(ids = -1L))
+  testthat::expect_error(setup_CUDA(ids = c(1L, 1L)))
+})
+
+testthat::test_that("an execution config carries its device through write and read", {
+  x <- setup_FutureExecution(
+    n_workers = 2L,
+    device = setup_CUDA(ids = 0:1),
+    seed = 3L
+  )
+  wire <- jsonlite::fromJSON(
+    jsonlite::toJSON(S7_to_list(x), auto_unbox = TRUE, null = "null"),
+    simplifyVector = FALSE
+  )
+  testthat::expect_identical(wire[["device"]][["type"]], "cuda")
+  xtoo <- getFromNamespace(".list_to_ExecutionConfig", "rtemis")(wire)
+  testthat::expect_s7_class(xtoo@device, CUDADeviceConfig)
+  testthat::expect_identical(xtoo@device@ids, 0:1)
+  testthat::expect_error(
+    getFromNamespace(".list_to_ExecutionConfig", "rtemis")(
+      list(backend = "none", device = list(type = "mps", ids = list(0L)))
+    ),
+    class = "rtemis_input_error"
+  )
+})
+
+testthat::test_that("a requested device an algorithm cannot use leaves it on the CPU, and the line says so", {
+  line <- paste(
+    gsub(
+      "\\033\\[[0-9;]*m",
+      "",
+      testthat::capture_messages(
+        decomp(
+          iris[, 1:4],
+          algorithm = "PCA",
+          execution_config = setup_SerialExecution(device = "mps", seed = 1L),
+          verbosity = 1L
+        )
+      )
+    ),
+    collapse = ""
+  )
+  testthat::expect_match(
+    line,
+    "// CPU (MPS requested; PCA cannot use it) | serial",
+    fixed = TRUE
   )
 })

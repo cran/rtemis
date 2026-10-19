@@ -1,0 +1,676 @@
+# 190_SuperConfig.R
+# ::rtemis::
+# 2025- EDG rtemis.org
+
+# References ----
+# https://github.com/RConsortium/S7
+# https://rconsortium.github.io/S7/
+
+# %% SuperConfig ----
+#' SuperConfig Class
+#'
+#' @description
+#' Abstract superclass for a supervised-learning configuration. Carries every
+#' property common to both concrete shapes -- a portable recipe naming file
+#' paths (`SuperConfigPaths`) and an in-memory recipe carrying tabular data
+#' directly (`SuperConfigTabular`) -- named for what a supervised-learning
+#' recipe *is* regardless of how its data arrives, the same idiom
+#' `ResamplerConfig`/`IngestConfig` and their leaves already use. Where a
+#' property genuinely accepts either concrete shape (e.g. a fitted
+#' `Supervised@config`, which records whichever kind of recipe trained it),
+#' typing it `NULL | SuperConfig` is the correct, precise union -- only
+#' *dispatch* on which shape a config is needs the concrete classes.
+#'
+#' @author EDG
+#' @noRd
+SuperConfig <- new_class(
+  name = "SuperConfig",
+  package = "rtemis",
+  abstract = TRUE,
+  properties = c(
+    list(
+      # Which column is predicted, and from which. rtemis's convention is that
+      # the outcome is the last column and every other column is a predictor,
+      # arranged by `set_outcome()`. That convention is fine as a default and
+      # wrong as the only expression of it: a default that is not in the config is
+      # a decision the record cannot report. Left NULL, the convention applies
+      # exactly as before; named, `train()` arranges the frame and the record
+      # says what was predicted from what.
+      outcome = prop_string(
+        NULL,
+        nullable = TRUE,
+        description = paste0(
+          "Name of the outcome column. Unset follows rtemis's convention, the last ",
+          "column."
+        )
+      ),
+      features = prop_string(
+        NULL,
+        nullable = TRUE,
+        vector = TRUE,
+        description = paste0(
+          "Names of the columns to use as predictors. Unset uses every column ",
+          "except the outcome."
+        )
+      ),
+      # Column name in the training data.
+      weights = prop_string(
+        NULL,
+        nullable = TRUE,
+        description = "Name of the column to use as case weights."
+      ),
+      # Binary-classification positive level.
+      positive_class = prop_string(
+        NULL,
+        nullable = TRUE,
+        description = "Outcome level to treat as positive (binary classification)."
+      ),
+      preprocessor_config = prop_object(
+        SupervisedPreprocessorConfig,
+        nullable = TRUE,
+        description = "Preprocessing configuration for predictors and outcome."
+      ),
+      decomposition_config = prop_object(
+        DecompositionConfig,
+        nullable = TRUE,
+        description = "Decomposition applied before supervised learning."
+      ),
+      hyperparameters = prop_object_choice(
+        Hyperparameters,
+        HyperparametersSet,
+        presence_key = "variants",
+        nullable = TRUE,
+        description = "One configuration, searched as the product of its values, or a named set searched as their union. Use one configuration when its settings vary independently."
+      ),
+      tuner_config = prop_object(
+        TunerConfig,
+        nullable = TRUE,
+        description = "Hyperparameter tuning configuration."
+      ),
+      outer_resampling_config = prop_object(
+        ResamplerConfig,
+        nullable = TRUE,
+        description = "Outer resampling configuration for estimating predictive performance."
+      ),
+      execution_config = prop_object(
+        ExecutionConfig,
+        description = "Execution backend and parallel worker settings."
+      ),
+      question = prop_string(
+        NULL,
+        nullable = TRUE,
+        description = "User-provided label / question for the run."
+      )
+    ),
+    prop_host_only(list(
+      # Not agent-writable: where and how much to log is the host's decision
+      # (the CLI, the server, the console a human is watching), never part of
+      # the modeling question an agent is answering. Read by
+      # `generate_authoring.R` into `authoring/v1`, not by any schema a model is
+      # ever handed -- see `PropertySpec@agent_writable`.
+      #
+      # Nullable: a run that writes nothing to disk records NULL, so a record
+      # names a directory only when the run wrote to it. `setup_SuperConfig()`
+      # defaults to "results/", so a portable recipe that omits the field
+      # writes there.
+      outdir = prop_string(
+        NULL,
+        nullable = TRUE,
+        description = "Output directory for results. Unset does not write to disk."
+      ),
+      verbosity = prop_integer(
+        1L,
+        min = 0L,
+        description = "Verbosity level."
+      )
+    ))
+  )
+) # /rtemis::SuperConfig
+
+
+# %% SuperConfigPaths ----
+#' SuperConfigPaths Class
+#'
+#' @description
+#' Supervised Learning Configuration Class, data-agnostic: names the file paths
+#' of the data. The portable, publishable, serializable shape --
+#' see [setup_SuperConfig].
+#'
+#' @author EDG
+#' @noRd
+SuperConfigPaths <- schema_class(
+  name = "SuperConfigPaths",
+  package = "rtemis",
+  parent = SuperConfig,
+  defaults = list(
+    execution_config = DefaultPolicy(
+      kind = "literal",
+      value = list(backend = "future")
+    ),
+    outdir = DefaultPolicy(kind = "literal", value = "results/")
+  ),
+  properties = list(
+    dat_training_path = prop_string(
+      NULL,
+      nullable = TRUE,
+      description = "Path to the training data."
+    ),
+    dat_validation_path = prop_string(
+      NULL,
+      nullable = TRUE,
+      description = "Path to the validation data."
+    ),
+    dat_test_path = prop_string(
+      NULL,
+      nullable = TRUE,
+      description = "Path to the held-out test data."
+    ),
+    # How the paths above are read. A delimited file carries no type
+    # information, so something has to decide that a column of labels is a
+    # factor rather than a string, and that decision belongs to the config: it
+    # changes what the run trains on, it is what `validate_config()` has to know
+    # to answer whether the run can work, and the record has to be able to
+    # report it. Applied to all three datasets, so their columns cannot end up
+    # typed differently from each other. Not shared with `SuperConfigTabular`:
+    # in-memory data arrives already typed, so there is nothing here to decide.
+    character2factor = prop_boolean(
+      TRUE,
+      description = paste0(
+        "Read character columns as factors. Supervised learning needs ",
+        "categorical predictors as factors, and a delimited file cannot say ",
+        "which columns those are."
+      )
+    )
+  ),
+  publication = SchemaPublication(
+    role = "document",
+    slug = "supervised",
+    title = "rtemis SuperConfig",
+    description = "Language-independent config for an rtemis supervised-learning run. Mirrors the `SuperConfig` object: data references, optional preprocessing / decomposition, an algorithm with hyperparameters, optional tuning and outer resampling, and execution settings. The same config drives rtemis (R), rtemis CLI/shell, and rtemislive.",
+    order = 4L,
+    kind = "pipeline",
+    record_provenance = "rtemis::Provenance",
+    record_session = "rtemis::DataRef",
+    record_folds = c(
+      "hyperparameters",
+      "preprocessor_config",
+      "decomposition_config"
+    ),
+    record_metrics = c(
+      "rtemis::RegressionMetrics",
+      "rtemis::ClassificationMetrics"
+    ),
+    record_metrics_shape = "samples"
+  )
+) # /rtemis::SuperConfigPaths
+
+
+# %% repr.SuperConfigPaths ----
+#' Repr SuperConfigPaths
+#'
+#' @param x `SuperConfigPaths` object.
+#' @param pad Integer: Number of spaces to pad the message with.
+#' @param output_type Character {"ansi", "html", or "plain"}: Output type.
+#'
+#' @return Character: Formatted string that can be printed with cat()
+#'
+#' @author EDG
+#' @noRd
+method(repr, SuperConfigPaths) <- function(x, pad = 0L, output_type = NULL) {
+  out <- repr_S7name("SuperConfigPaths", pad = pad, output_type = output_type)
+  out <- paste0(
+    out,
+    repr_ls(props(x), pad = pad, limit = 20L, output_type = output_type)
+  )
+  out
+} # /rtemis::repr.SuperConfigPaths
+
+
+# %% print.SuperConfigPaths ----
+#' Print `SuperConfigPaths`
+#'
+#' Print `SuperConfigPaths` object
+#'
+#' @param x `SuperConfigPaths` object.
+#' @param ... Not used.
+#'
+#' @author EDG
+#' @noRd
+method(print, SuperConfigPaths) <- function(x, output_type = NULL, ...) {
+  cat(repr(x, output_type = output_type))
+  invisible(x)
+} # /rtemis::print.SuperConfigPaths
+
+
+# %% setup_SuperConfig ----
+#' Setup SuperConfig
+#'
+#' Setup `SuperConfig` object. `SuperConfig` is a portable, data-agnostic recipe:
+#' `dat_training_path` is optional, so the same config can be validated, shared,
+#' or described without data and have a path bound later (e.g. by the `rtemis`
+#' CLI) before [train].
+#'
+#' @param dat_training_path Character or NULL: Path to training data file. NULL
+#' leaves the recipe unbound; set it (or supply data) before [train].
+#' @param dat_validation_path Optional Character: Path to validation data file.
+#' @param dat_test_path Optional Character: Path to test data file.
+#' @param character2factor Logical: If TRUE, read character columns as factors.
+#' A delimited file carries no type information, so this is what decides whether
+#' a column of labels is a categorical predictor or an unusable string one.
+#' Applied to all three datasets.
+#' @param outcome Optional Character: Name of the outcome column; `NULL` for
+#' rtemis's convention, the last column.
+#' @param features Optional Character vector: Names of the predictor columns;
+#' `NULL` for every column except the outcome.
+#' @param weights Optional Character: Column name in training data to use as observation weights.
+#' If NULL, no weights are used.
+#' @param positive_class Character or NULL: For binary classification, the
+#' outcome level to treat as positive. NULL keeps the existing factor level order.
+#' @param preprocessor_config Optional `SupervisedPreprocessorConfig`: Configuration for data preprocessing.
+#' @param decomposition_config Optional `DecompositionConfig`: Configuration for data decomposition.
+#' @param hyperparameters Optional `Hyperparameters` or `HyperparametersSet`: One model configuration or a named set of configurations searched as a union.
+#' @param tuner_config Optional `TunerConfig`: Configuration for hyperparameter tuning.
+#' @param outer_resampling_config Optional `ResamplerConfig`: Configuration for outer res
+#' resampling during model training.
+#' @param execution_config `ExecutionConfig` object: Configuration for execution settings. Setup
+#' with [setup_SerialExecution], [setup_FutureExecution] or [setup_MiraiExecution].
+#' @param question Optional Character: Question to answer with the supervised learning analysis.
+#' @param outdir Optional Character: Output directory for results; `NULL` to
+#' write nothing to disk.
+#' @param verbosity Integer [0, Inf): Verbosity level.
+#'
+#' @return `SuperConfigPaths` object.
+#'
+#' @author EDG
+#' @export
+#' @examples
+#' \dontrun{
+#' # requires local data file
+#' sc <- setup_SuperConfig(
+#'   dat_training_path = "train.csv",
+#'   preprocessor_config = setup_SupervisedPreprocessor(scale = TRUE),
+#'   hyperparameters = setup_LightRF(),
+#'   tuner_config = setup_GridSearch(),
+#'   outer_resampling_config = setup_KFold(),
+#'   execution_config = setup_FutureExecution(),
+#'   question = "Can we tell iris species apart given their measurements?",
+#'   outdir = "models/"
+#' )
+#' }
+setup_SuperConfig <- function(
+  dat_training_path = NULL,
+  dat_validation_path = NULL,
+  dat_test_path = NULL,
+  character2factor = TRUE,
+  outcome = NULL,
+  features = NULL,
+  weights = NULL,
+  positive_class = NULL,
+  preprocessor_config = NULL,
+  decomposition_config = NULL,
+  hyperparameters = NULL,
+  tuner_config = NULL,
+  outer_resampling_config = NULL,
+  execution_config = setup_FutureExecution(),
+  question = NULL,
+  outdir = "results/",
+  verbosity = 1L
+) {
+  apply_setup_defaults(SuperConfigPaths)
+  # `train()` applies the fitted decomposition to every set after the training
+  # one, so only an algorithm that applies to new data can stand here.
+  if (!is.null(decomposition_config)) {
+    check_decom_applicable(decomposition_config)
+  }
+  # Validated, not resolved: a config is a portable recipe, so it stores the
+  # path as its author wrote it, unresolved against this machine's working
+  # directory.
+  if (!is.null(dat_training_path)) {
+    dat_training_path <- sanitize_path(
+      dat_training_path,
+      must_exist = FALSE,
+      normalize = FALSE
+    )
+  }
+
+  if (!is.null(dat_validation_path)) {
+    dat_validation_path <- sanitize_path(
+      dat_validation_path,
+      must_exist = FALSE,
+      normalize = FALSE
+    )
+  }
+
+  if (!is.null(dat_test_path)) {
+    dat_test_path <- sanitize_path(
+      dat_test_path,
+      must_exist = FALSE,
+      normalize = FALSE
+    )
+  }
+
+  # Nullable like the property it fills, and like `setup_SuperConfigLive()`: a
+  # run that writes nothing to disk has no path to sanitize.
+  if (!is.null(outdir)) {
+    outdir <- sanitize_path(
+      outdir,
+      must_exist = FALSE,
+      type = "any",
+      normalize = FALSE
+    )
+  }
+
+  SuperConfigPaths(
+    dat_training_path = dat_training_path,
+    dat_validation_path = dat_validation_path,
+    dat_test_path = dat_test_path,
+    character2factor = character2factor,
+    outcome = outcome,
+    features = features,
+    weights = weights,
+    positive_class = positive_class,
+    preprocessor_config = preprocessor_config,
+    decomposition_config = decomposition_config,
+    hyperparameters = hyperparameters,
+    tuner_config = tuner_config,
+    outer_resampling_config = outer_resampling_config,
+    execution_config = execution_config,
+    question = question,
+    outdir = outdir,
+    verbosity = verbosity
+  )
+} # /setup_SuperConfig
+
+
+# %% .detect_config_kind ----
+#' Detect the config family of a parsed config list
+#'
+#' Maps a parsed config's `$schema` URL to its rtemis family by exact match
+#' against the supported schemas (.RTEMIS_SUPPORTED_CONFIGS). A missing,
+#' malformed, or unrecognized `$schema` is an error: every config must declare a
+#' known schema.
+#'
+#' @param x Named list from a parsed JSON config.
+#'
+#' @return Character: a family name from .RTEMIS_SUPPORTED_CONFIGS.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+.detect_config_kind <- function(x) {
+  schema <- x[["$schema"]]
+  supported <- .RTEMIS_SUPPORTED_CONFIGS
+  if (is.null(schema) || !is.character(schema) || length(schema) != 1L) {
+    rtemis.core::abort(
+      "Config is missing a valid `$schema`.\n",
+      "Every config must declare one of the supported schemas:\n",
+      paste0("  - ", supported, collapse = "\n"),
+      class = c("rtemis_value_error", "rtemis_input_error")
+    )
+  }
+  kind <- names(supported)[match(schema, supported)]
+  if (is.na(kind)) {
+    # A record is the same field vocabulary with every value resolved, so it
+    # would *read* as a config and replace the defaults the caller expected to
+    # be live -- including values a run derived from data this call
+    # has never seen. The error names the record kind.
+    record_kind <- names(.RTEMIS_RECORD_SCHEMAS)[
+      match(schema, .RTEMIS_RECORD_SCHEMAS)
+    ]
+    if (!is.na(record_kind)) {
+      rtemis.core::abort(
+        "This is a ",
+        record_kind,
+        " run *record*, not a config.\n",
+        "A record states what one run resolved -- including values derived ",
+        "from its data -- so using it as an input would silently pin settings ",
+        "this call should decide for itself.",
+        class = c("rtemis_value_error", "rtemis_input_error")
+      )
+    }
+    rtemis.core::abort(
+      "Unsupported `$schema`: ",
+      schema,
+      ".\nSupported schemas:\n",
+      paste0("  - ", supported, collapse = "\n"),
+      class = c("rtemis_value_error", "rtemis_input_error")
+    )
+  }
+  kind
+} # /rtemis::.detect_config_kind
+
+
+# %% .list_to_SuperConfig ----
+#' Convert a list to a `SuperConfig` object
+#'
+#' Reconstructs a `SuperConfig` from a named list, such as the result of
+#' parsing a JSON config; [read_config] uses it for supervised documents. Nested
+#' config objects are rebuilt via their respective `.list_to_*` / `setup_*`
+#' functions.
+#'
+#' Exported for `rtemis.server`, which reconstructs supervised configs received
+#' over the wire.
+#'
+#' @param x Named list carrying `SuperConfig` fields (e.g. `hyperparameters`,
+#'   `decomposition_config`, `outer_resampling_config`).
+#'
+#' @return `SuperConfigPaths` object.
+#'
+#' @author EDG
+#' @keywords internal
+#' @export
+#' @examples
+#' .list_to_SuperConfig(list(
+#'   dat_training_path = "train.csv",
+#'   outcome = "y",
+#'   hyperparameters = list(algorithm = "GLMNET", alpha = 1)
+#' ))
+.list_to_SuperConfig <- function(x) {
+  check_wire_keys(x, names(SuperConfigPaths@properties), "supervised config")
+  args <- list(
+    dat_training_path = x[["dat_training_path"]],
+    dat_validation_path = x[["dat_validation_path"]],
+    dat_test_path = x[["dat_test_path"]],
+    outcome = iflengthy(x[["outcome"]]),
+    features = iflengthy(x[["features"]]),
+    weights = x[["weights"]],
+    positive_class = iflengthy(x[["positive_class"]]),
+    preprocessor_config = if (is.null(x[["preprocessor_config"]])) {
+      NULL
+    } else {
+      .list_to_SupervisedPreprocessorConfig(x[["preprocessor_config"]])
+    },
+    decomposition_config = if (is.null(x[["decomposition_config"]])) {
+      NULL
+    } else {
+      .list_to_DecompositionConfig(x[["decomposition_config"]])
+    },
+    hyperparameters = if (is.null(x[["hyperparameters"]])) {
+      NULL
+    } else if (is_wire_hyperparameters_set(x[["hyperparameters"]])) {
+      .list_to_HyperparametersSet(x[["hyperparameters"]])
+    } else {
+      .list_to_Hyperparameters(x[["hyperparameters"]])
+    },
+    tuner_config = if (is.null(x[["tuner_config"]])) {
+      NULL
+    } else {
+      .list_to_TunerConfig(x[["tuner_config"]])
+    },
+    outer_resampling_config = if (is.null(x[["outer_resampling_config"]])) {
+      NULL
+    } else {
+      .list_to_ResamplerConfig(x[["outer_resampling_config"]])
+    },
+    question = iflengthy(x[["question"]])
+  )
+  # `execution_config` and `verbosity` carry non-NULL defaults in
+  # `setup_SuperConfig`; only override them when the config actually supplies a
+  # value, so a portable recipe that omits them keeps the defaults.
+  if (!is.null(x[["execution_config"]])) {
+    args[["execution_config"]] <- .list_to_ExecutionConfig(
+      x[["execution_config"]]
+    )
+  }
+  # `outdir` is nullable *and* carries a non-NULL `setup_SuperConfig` default,
+  # so an absent key and an explicit `null` mean different things: absent keeps
+  # "results/", `null` means write nothing. Key presence is the only thing that
+  # separates them. `args["outdir"] <- list(NULL)` stores a NULL element;
+  # `args[["outdir"]] <- NULL` would delete it and restore the default.
+  if ("outdir" %in% names(x)) {
+    args["outdir"] <- list(x[["outdir"]])
+  }
+  if (!is.null(x[["verbosity"]])) {
+    args[["verbosity"]] <- x[["verbosity"]]
+  }
+  # Non-nullable with a TRUE default, so an absent key keeps the default and
+  # only an explicit `false` turns the conversion off.
+  if (!is.null(x[["character2factor"]])) {
+    args[["character2factor"]] <- x[["character2factor"]]
+  }
+  do.call(setup_SuperConfig, args)
+} # /rtemis::.list_to_SuperConfig
+
+
+# %% SuperConfigTabular ----
+#' SuperConfigTabular
+#'
+#' @details
+#' Like `SuperConfigPaths`, but carries in-memory training/validation/test
+#' data in place of file paths. Used by `rtemislive`, where uploads arrive over
+#' a WS frame.
+#' Not serializable to a config file -- in-memory data does not round-trip
+#' cleanly. Use `SuperConfigPaths` when you need on-disk reproducibility.
+#'
+#' @author EDG
+#' @noRd
+SuperConfigTabular <- new_class(
+  name = "SuperConfigTabular",
+  package = "rtemis",
+  parent = SuperConfig,
+  properties = list(
+    dat_training = class_tabular,
+    dat_validation = NULL | class_tabular,
+    dat_test = NULL | class_tabular
+  )
+) # /rtemis::SuperConfigTabular
+
+
+# %% repr.SuperConfigTabular ----
+#' @author EDG
+#' @noRd
+method(repr, SuperConfigTabular) <- function(x, pad = 0L, output_type = NULL) {
+  out <- repr_S7name("SuperConfigTabular", pad = pad, output_type = output_type)
+  # Replace heavy data slots with a {rows, cols} summary so the printout
+  # stays readable.
+  pl <- props(x)
+  fmt_dim <- function(d) {
+    if (is.null(d)) {
+      return(NULL)
+    }
+    paste0("<", NROW(d), " x ", NCOL(d), ">")
+  }
+  pl[["dat_training"]] <- fmt_dim(pl[["dat_training"]])
+  pl[["dat_validation"]] <- fmt_dim(pl[["dat_validation"]])
+  pl[["dat_test"]] <- fmt_dim(pl[["dat_test"]])
+  out <- paste0(
+    out,
+    repr_ls(pl, pad = pad, limit = 20L, output_type = output_type)
+  )
+  out
+} # /rtemis::repr.SuperConfigTabular
+
+
+# %% print.SuperConfigTabular ----
+#' @author EDG
+#' @noRd
+method(print, SuperConfigTabular) <- function(x, output_type = NULL, ...) {
+  cat(repr(x, output_type = output_type))
+  invisible(x)
+} # /rtemis::print.SuperConfigTabular
+
+
+# %% setup_SuperConfigLive ----
+#' Setup SuperConfigLive
+#'
+#' Build a `SuperConfigTabular` -- same shape as [setup_SuperConfig] but with
+#' in-memory tabular data instead of file paths.
+#'
+#' @param dat_training data.frame or data.table. Training data.
+#' @param dat_validation data.frame, data.table, or `NULL`.
+#' @param outcome Optional Character: Name of the outcome column; `NULL`
+#' for rtemis's convention, the last column.
+#' @param features Optional Character vector: Names of the predictor
+#' columns; `NULL` for every column except the outcome.
+#' @param dat_test data.frame, data.table, or `NULL`.
+#' @param weights Optional Character: Column name in `dat_training` used
+#'   as observation weights.
+#' @param positive_class Optional Character: For binary classification, the
+#'   outcome level to treat as positive; forwarded to [train] which reorders
+#'   the outcome factor via [set_positive_class]. `NULL` keeps the existing
+#'   level order.
+#' @param preprocessor_config,hyperparameters,tuner_config,outer_resampling_config,execution_config,question,verbosity
+#'   See [setup_SuperConfig].
+#' @param decomposition_config Optional `DecompositionConfig`: Configuration for data decomposition.
+#' @param outdir Optional Character: Output directory; `NULL`
+#'   means "do not write to disk" (the rtemislive case).
+#'
+#' @return `SuperConfigTabular` object.
+#'
+#' @author EDG
+#' @export
+#' @examples
+#' scl <- setup_SuperConfigLive(
+#'   dat_training = iris,
+#'   hyperparameters = setup_LightGBM(),
+#'   outer_resampling_config = setup_KFold(),
+#'   question = "Can we tell iris species apart given their measurements?"
+#' )
+setup_SuperConfigLive <- function(
+  dat_training,
+  dat_validation = NULL,
+  dat_test = NULL,
+  outcome = NULL,
+  features = NULL,
+  weights = NULL,
+  positive_class = NULL,
+  preprocessor_config = NULL,
+  decomposition_config = NULL,
+  hyperparameters = NULL,
+  tuner_config = NULL,
+  outer_resampling_config = NULL,
+  execution_config = setup_FutureExecution(),
+  question = NULL,
+  outdir = NULL,
+  verbosity = 1L
+) {
+  if (!is.null(decomposition_config)) {
+    check_decom_applicable(decomposition_config)
+  }
+  if (!is.null(outdir)) {
+    outdir <- sanitize_path(
+      outdir,
+      must_exist = FALSE,
+      type = "any",
+      normalize = FALSE
+    )
+  }
+  SuperConfigTabular(
+    dat_training = dat_training,
+    dat_validation = dat_validation,
+    dat_test = dat_test,
+    outcome = outcome,
+    features = features,
+    weights = weights,
+    positive_class = positive_class,
+    preprocessor_config = preprocessor_config,
+    decomposition_config = decomposition_config,
+    hyperparameters = hyperparameters,
+    tuner_config = tuner_config,
+    outer_resampling_config = outer_resampling_config,
+    execution_config = execution_config,
+    question = question,
+    outdir = outdir,
+    verbosity = as.integer(verbosity)
+  )
+} # /rtemis::setup_SuperConfigLive

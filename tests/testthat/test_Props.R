@@ -1,0 +1,1969 @@
+# test_Props.R
+# ::rtemis::
+# 2026- EDG rtemis.org
+
+# library(testthat)
+
+# %% Pilot class ----
+# LightRF hyperparameters declared with the prop_* factories: types, defaults,
+# bounds, tunability, and descriptions in ONE place, from which both the S7
+# validators and the JSON Schema are generated. Defined here (not in R/) until
+# the migration of 070_Hyperparameters.R.
+LightRFProps <- S7::new_class(
+  name = "LightRFProps",
+  package = NULL,
+  properties = list(
+    nrounds = prop_integer(
+      500L,
+      min = 1L,
+      tunable = TRUE,
+      description = "Number of boosting rounds (trees)."
+    ),
+    num_leaves = prop_integer(
+      4096L,
+      min = 1L,
+      tunable = TRUE,
+      description = "Maximum number of leaves per tree."
+    ),
+    max_depth = prop_integer(
+      -1L,
+      tunable = TRUE,
+      description = "Maximum tree depth. -1 = no limit."
+    ),
+    feature_fraction = prop_float(
+      0.7,
+      exclusive_min = 0,
+      max = 1,
+      tunable = TRUE,
+      description = "Fraction of features sampled per tree."
+    ),
+    subsample = prop_float(
+      0.623,
+      exclusive_min = 0,
+      max = 1,
+      tunable = TRUE,
+      description = "Fraction of cases sampled per tree (bagging fraction)."
+    ),
+    lambda_l1 = prop_float(
+      0,
+      min = 0,
+      tunable = TRUE,
+      description = "L1 regularization."
+    ),
+    lambda_l2 = prop_float(
+      0,
+      min = 0,
+      tunable = TRUE,
+      description = "L2 regularization."
+    ),
+    max_cat_threshold = prop_integer(
+      32L,
+      min = 1L,
+      tunable = TRUE,
+      description = "Maximum number of split points for categorical features."
+    ),
+    min_data_per_group = prop_integer(
+      32L,
+      min = 1L,
+      tunable = TRUE,
+      description = "Minimum number of cases per categorical group."
+    ),
+    linear_tree = prop_boolean(
+      FALSE,
+      tunable = TRUE,
+      description = "Fit linear models at leaves."
+    ),
+    ifw = prop_boolean(
+      FALSE,
+      tunable = TRUE,
+      description = "Inverse frequency weighting of outcome classes."
+    ),
+    objective = prop_string(
+      NULL,
+      nullable = TRUE,
+      description = "LightGBM objective. Unset sets it from the outcome type."
+    ),
+    device_type = prop_string(
+      "cpu",
+      enum = c("cpu", "gpu", "cuda"),
+      description = "Compute device."
+    ),
+    tree_learner = prop_string(
+      "serial",
+      enum = c("serial", "feature", "data", "voting"),
+      description = "Tree learner type."
+    ),
+    force_col_wise = prop_boolean(
+      TRUE,
+      description = "Force column-wise histogram building."
+    )
+  )
+)
+
+# %% Defaults ----
+testthat::test_that("factory defaults populate a bare instance", {
+  x <- LightRFProps()
+  testthat::expect_identical(x@nrounds, 500L)
+  testthat::expect_identical(x@num_leaves, 4096L)
+  testthat::expect_identical(x@feature_fraction, 0.7)
+  # Nullable prop without default reads as NULL: factories declare nullable
+  # props as `NULL | <base>`, so S7 prototypes them to NULL rather than to the
+  # base class's empty vector (see validate_with_spec).
+  testthat::expect_null(x@objective)
+  testthat::expect_identical(x@device_type, "cpu")
+  testthat::expect_true(x@force_col_wise)
+})
+
+# %% Validation ----
+testthat::test_that("spec-generated validators enforce bounds, enum, arity", {
+  # Bounds.
+  testthat::expect_error(LightRFProps(nrounds = 0L))
+  testthat::expect_error(LightRFProps(feature_fraction = 0)) # exclusive min
+  testthat::expect_error(LightRFProps(feature_fraction = 1.1))
+  testthat::expect_no_error(LightRFProps(feature_fraction = 1)) # inclusive max
+  testthat::expect_error(LightRFProps(lambda_l1 = -0.1))
+  # Enum.
+  testthat::expect_error(LightRFProps(device_type = "tpu"))
+  testthat::expect_no_error(LightRFProps(device_type = "gpu"))
+  # Type (enforced by the property's S7 class).
+  testthat::expect_error(LightRFProps(nrounds = "many"))
+  # NA.
+  testthat::expect_error(LightRFProps(subsample = NA_real_))
+  # Nullability.
+  testthat::expect_no_error(LightRFProps(objective = NULL))
+  testthat::expect_error(LightRFProps(device_type = NULL))
+})
+
+testthat::test_that("NULL is the only unset value; zero-length is rejected", {
+  # A nullable prop is NULL whether it was defaulted or set explicitly, and an
+  # empty vector is a real (invalid) value rather than a second spelling of
+  # "unset" -- this is what keeps `!is.null()` guards meaningful downstream.
+  testthat::expect_null(LightRFProps()@objective)
+  testthat::expect_null(LightRFProps(objective = NULL)@objective)
+  testthat::expect_error(
+    LightRFProps(objective = character(0)),
+    "must not be empty"
+  )
+  testthat::expect_error(
+    LightRFProps(nrounds = integer(0)),
+    "must not be empty"
+  )
+  # The empty-value message may only point at NULL where NULL is accepted.
+  err <- testthat::expect_error(LightRFProps(objective = character(0)))
+  testthat::expect_match(conditionMessage(err), "use NULL", fixed = TRUE)
+  err <- testthat::expect_error(LightRFProps(nrounds = integer(0)))
+  testthat::expect_no_match(conditionMessage(err), "use NULL", fixed = TRUE)
+  # A non-nullable prop's class is the bare base class rather than a union
+  # with NULL, so S7's own type check rejects NULL before the spec validator
+  # is reached. (The validator's NULL branch guards the factory-time check of
+  # a spec's own default; see "bad defaults fail at factory time" below.)
+  testthat::expect_error(LightRFProps(nrounds = NULL), "not <NULL>")
+})
+
+testthat::test_that("tunable properties accept search vectors; fixed do not", {
+  x <- LightRFProps(num_leaves = tune_over(1024L, 4096L, 16384L))
+  testthat::expect_length(x@num_leaves@candidates, 3L)
+  # Every search value is bounds-checked.
+  testthat::expect_error(LightRFProps(num_leaves = tune_over(1024L, 0L)))
+  # Fixed hyperparameters reject vectors.
+  testthat::expect_error(LightRFProps(device_type = c("cpu", "gpu")))
+  testthat::expect_error(LightRFProps(force_col_wise = c(TRUE, FALSE)))
+})
+
+# %% Factory-time default validation ----
+testthat::test_that("bad defaults fail at factory time, not first instantiation", {
+  # Default below its own bound.
+  testthat::expect_error(prop_integer(0L, min = 1L), "default")
+  # Double default for an integer property.
+  testthat::expect_error(prop_integer(500, min = 1L), "default")
+  # Default outside its own enum.
+  testthat::expect_error(prop_string("x", enum = c("a", "b")), "default")
+  # Default above inclusive max.
+  testthat::expect_error(prop_float(1.5, max = 1), "default")
+  # NULL default requires nullable.
+  testthat::expect_error(prop_string(NULL, nullable = FALSE), "default")
+  testthat::expect_no_error(prop_string(NULL, nullable = TRUE))
+})
+
+# %% Exclusive integer bounds ----
+testthat::test_that("prop_integer takes exclusive bounds and emits them", {
+  Cls <- S7::new_class(
+    "ExclIntProps",
+    properties = list(
+      # An open lower bound on a count: "at least one", stated as > 0 rather
+      # than min = 1, for a backend whose own documentation reads that way.
+      n = prop_integer(1L, exclusive_min = 0L),
+      k = prop_integer(1L, exclusive_max = 10L)
+    )
+  )
+  testthat::expect_error(Cls(n = 0L))
+  testthat::expect_no_error(Cls(n = 1L))
+  testthat::expect_error(Cls(k = 10L))
+  testthat::expect_no_error(Cls(k = 9L))
+
+  # The bound reaches the schema, not just the R validator.
+  s <- spec_to_schema(get_spec(Cls@properties[["n"]]))
+  testthat::expect_identical(s[["type"]], "integer")
+  testthat::expect_identical(s[["exclusiveMinimum"]], 0L)
+  testthat::expect_null(s[["minimum"]])
+  s <- spec_to_schema(get_spec(Cls@properties[["k"]]))
+  testthat::expect_identical(s[["exclusiveMaximum"]], 10L)
+
+  # A default outside its own exclusive bound fails at factory time, as it
+  # does for the inclusive bounds and for prop_float.
+  testthat::expect_error(prop_integer(0L, exclusive_min = 0L), "default")
+})
+
+
+# %% Vector-valued props ----
+# %% Arity axes: container / items / broadcast ----
+# Hand-built specs for shapes the factories do not yet expose (nested items,
+# maps, broadcast). `default` is required whenever `nullable` is FALSE, so the
+# helper supplies one.
+mk_spec <- function(...) {
+  args <- list(
+    type = "number",
+    default = 0,
+    minimum = NULL,
+    maximum = NULL,
+    exclusive_minimum = NULL,
+    exclusive_maximum = NULL,
+    enum = NULL,
+    nullable = FALSE,
+    tunable = FALSE,
+    container = "none",
+    items = NULL,
+    broadcast = FALSE,
+    data_dependent = FALSE,
+    description = ""
+  )
+  do.call(PropertySpec, utils::modifyList(args, list(...)))
+}
+
+
+testthat::test_that("`vector = TRUE` is sugar for container 'array'", {
+  spec <- get_spec(prop_float(NULL, min = 0, nullable = TRUE, vector = TRUE))
+  testthat::expect_identical(spec@container, "array")
+  testthat::expect_null(spec@items)
+  testthat::expect_false(spec@broadcast)
+  testthat::expect_identical(get_spec(prop_float(1))@container, "none")
+})
+
+
+# %% Every declaration is enforced ----
+# The factory's promise is that declaring a constraint is enough -- nothing is
+# enforced by hand. Twice now a declaration has been published in the schema and
+# left unenforced in R, both times because S7's class check could not see the
+# value: an element of a nested container (the property is a plain `list`) and a
+# tuning candidate (the property's class is a union with
+# `HyperparameterCandidates`). Both are invisible to a spot check and neither
+# fails until much later, so the whole surface is swept here instead.
+#
+# Every spec'd property in the package, every path a value can arrive by.
+
+# One value of the wrong R type, shaped for this spec's container.
+wrong_typed <- function(fields) {
+  bad <- if (fields[["type"]] == "string") 1L else "zzz"
+  if (
+    !is.null(fields[["items"]]) && fields[["items"]][["container"]] != "none"
+  ) {
+    list(bad)
+  } else {
+    bad
+  }
+}
+
+
+# One value outside the declared set or bounds, or NULL if neither is declared.
+out_of_range <- function(fields) {
+  value <- if (!is.null(fields[["enum"]])) {
+    "zzz_not_in_enum"
+  } else if (!is.null(fields[["maximum"]])) {
+    fields[["maximum"]] + 1
+  } else if (!is.null(fields[["minimum"]])) {
+    fields[["minimum"]] - 1
+  } else if (!is.null(fields[["exclusive_maximum"]])) {
+    fields[["exclusive_maximum"]]
+  } else if (!is.null(fields[["exclusive_minimum"]])) {
+    fields[["exclusive_minimum"]]
+  } else {
+    return(NULL)
+  }
+  if (fields[["type"]] == "integer" && is.numeric(value)) {
+    value <- as.integer(value)
+  }
+  if (
+    !is.null(fields[["items"]]) && fields[["items"]][["container"]] != "none"
+  ) {
+    list(value)
+  } else {
+    value
+  }
+}
+
+
+# Whether a property accepts a value, exercised the way production does: class
+# check first, then validator.
+prop_accepts <- function(property, value) {
+  Probe <- S7::new_class("Probe", properties = list(x = property))
+  tryCatch(
+    {
+      Probe(x = value)
+      TRUE
+    },
+    error = function(e) FALSE
+  )
+}
+
+
+testthat::test_that("every declared type, bound and enum is enforced", {
+  # Reads every class in the namespace; depends only on the package source,
+  # and CI runs it.
+  skip_on_cran()
+  ns <- asNamespace("rtemis")
+  classes <- mget(ns[[".class_names"]], envir = ns, inherits = FALSE)
+
+  unenforced <- character()
+  n_checked <- 0L
+  for (cls_name in names(classes)) {
+    cls <- classes[[cls_name]]
+    for (nm in names(cls@properties)) {
+      property <- cls@properties[[nm]]
+      fields <- get_spec_fields(property)
+      # A constant is not settable, so there is no value to reject.
+      if (is.null(fields) || isTRUE(fields[["constant"]])) {
+        next
+      }
+      n_checked <- n_checked + 1L
+      id <- paste0(cls_name, "@", nm)
+      bad_type <- wrong_typed(fields)
+      bad_range <- out_of_range(fields)
+      checks <- list(
+        list("type", bad_type),
+        list("bound/enum", bad_range)
+      )
+      if (isTRUE(fields[["tunable"]])) {
+        # A search space is checked value by value: an out-of-range candidate
+        # would otherwise surface as a failed grid cell partway through tuning.
+        checks <- c(
+          checks,
+          list(
+            list("type, as a candidate", tune_over(c(bad_type, bad_type))),
+            if (!is.null(bad_range)) {
+              list(
+                "bound/enum, as a candidate",
+                tune_over(c(
+                  bad_range,
+                  bad_range
+                ))
+              )
+            }
+          )
+        )
+      }
+      for (check in Filter(Negate(is.null), checks)) {
+        if (is.null(check[[2L]])) {
+          next
+        }
+        if (prop_accepts(property, check[[2L]])) {
+          unenforced <- c(unenforced, paste0(id, " (", check[[1L]], ")"))
+        }
+      }
+    }
+  }
+
+  testthat::expect_gt(n_checked, 400L)
+  testthat::expect_identical(
+    unenforced,
+    character(),
+    info = "declared but not enforced -- the spec says it, nothing checks it"
+  )
+})
+
+
+testthat::test_that("a nested container's elements are type-checked", {
+  # The one place the property's S7 class cannot enforce the type: R has no
+  # "list of integer vectors" class, so the property is a plain `list` and the
+  # element type is checked by the validator or by nobody.
+  Nested <- S7::new_class(
+    "Nested",
+    properties = list(
+      idx = prop_array(
+        items = prop_integer(1L, min = 1L, vector = TRUE),
+        nullable = TRUE,
+        description = "Indices."
+      )
+    )
+  )
+  testthat::expect_no_error(Nested(idx = list(1:3, 2:4)))
+  testthat::expect_error(Nested(idx = list(c(1, 2))), "must be integer")
+  testthat::expect_error(Nested(idx = list("a")), "must be integer")
+  # The checks the element already had still apply, after the type.
+  testthat::expect_error(Nested(idx = list(0L)), "must be >= 1")
+  testthat::expect_error(Nested(idx = list(c(1L, NA_integer_))), "missing")
+  # NULL is the only "unset" value, so an empty container is a real value.
+  testthat::expect_error(Nested(idx = list()), "must not be empty")
+  testthat::expect_no_error(Nested(idx = NULL))
+})
+
+
+testthat::test_that("a broadcast element is accepted in place of its container", {
+  # `broadcast` means "this element at every position", so the element's own
+  # class has to be accepted beside the list -- otherwise S7 rejects the bare
+  # form before the validator that implements broadcasting ever runs.
+  hyperparameters <- setup_Ranger(split_select_weights = c(0.3, 0.7))
+  testthat::expect_identical(
+    hyperparameters@hyperparameters[["split_select_weights"]],
+    c(0.3, 0.7)
+  )
+  testthat::expect_no_error(
+    setup_Ranger(split_select_weights = list(c(0.5, 0.5), c(0.1, 0.9)))
+  )
+  # Broadcasting widens the shape, never the contract: the bare element is held
+  # to the same spec each listed element would be.
+  testthat::expect_error(
+    setup_Ranger(split_select_weights = c(0.3, 1.7)),
+    "must be <= 1"
+  )
+  testthat::expect_error(setup_Ranger(split_select_weights = c("a", "b")))
+  # A container that does not broadcast still takes the list form only.
+  testthat::expect_error(setup_Ranger(inbag = c(1L, 2L)), "must be")
+})
+
+
+testthat::test_that("a nested `items` spec produces a nested array schema", {
+  # A matrix is an array whose items are an array -- a shape `vector = TRUE`
+  # alone cannot express.
+  s <- spec_to_schema(mk_spec(
+    container = "array",
+    items = mk_spec(container = "array", default = c(0, 1)),
+    default = list(c(0, 1))
+  ))
+  testthat::expect_identical(s[["type"]], "array")
+  testthat::expect_identical(s[["items"]][["type"]], "array")
+  testthat::expect_identical(s[["items"]][["items"]][["type"]], "number")
+})
+
+
+testthat::test_that("container 'map' produces additionalProperties", {
+  s <- spec_to_schema(mk_spec(
+    container = "map",
+    items = mk_spec(),
+    default = c(a = 0)
+  ))
+  testthat::expect_identical(s[["type"]], "object")
+  testthat::expect_identical(s[["additionalProperties"]][["type"]], "number")
+})
+
+
+testthat::test_that("broadcast emits scalar-or-array, distinct from tunable", {
+  s <- spec_to_schema(mk_spec(container = "array", broadcast = TRUE))
+  testthat::expect_length(s[["oneOf"]], 2L)
+  testthat::expect_identical(s[["oneOf"]][[1L]][["type"]], "number")
+  testthat::expect_identical(s[["oneOf"]][[2L]][["type"]], "array")
+  # Structurally the same shape as a tunable oneOf, semantically unrelated:
+  # one broadcasts a value, the other declares a search space. Only the
+  # declaration tells them apart -- which is why `x-rtemis` must carry it.
+  tun <- spec_to_schema(get_spec(prop_float(1, tunable = TRUE)))
+  testthat::expect_length(tun[["oneOf"]], 2L)
+})
+
+
+testthat::test_that("the arity axes are validated against each other", {
+  testthat::expect_error(mk_spec(container = "bogus"), "container")
+  # An array container may be tunable: its search space sits one level of
+  # nesting above its value, so the two are distinguishable.
+  testthat::expect_no_error(mk_spec(container = "array", tunable = TRUE))
+  # Nesting is only defined for arrays, so no other container may be tunable.
+  testthat::expect_error(
+    mk_spec(container = "map", items = mk_spec(), tunable = TRUE),
+    "tunable"
+  )
+  # `broadcast` makes a bare element a value too, so the array level would mean
+  # both "one explicit value" and "a search over broadcast elements".
+  testthat::expect_error(
+    mk_spec(container = "array", broadcast = TRUE, tunable = TRUE),
+    "broadcast"
+  )
+  # A search space over a container of containers would need a third level.
+  testthat::expect_error(
+    mk_spec(
+      container = "array",
+      items = mk_spec(container = "array"),
+      tunable = TRUE
+    ),
+    "scalar elements"
+  )
+  # `items` is meaningless without a container, and required for a map.
+  testthat::expect_error(mk_spec(items = mk_spec()), "items")
+  testthat::expect_error(mk_spec(container = "map"), "items")
+  testthat::expect_error(
+    mk_spec(container = "array", items = 1),
+    "PropertySpec"
+  )
+  # Nothing to broadcast into.
+  testthat::expect_error(mk_spec(broadcast = TRUE), "broadcast")
+})
+
+
+testthat::test_that("vector props accept vectors, map to array schemas", {
+  Vec <- S7::new_class(
+    name = "Vec",
+    package = NULL,
+    properties = list(
+      w = prop_float(
+        NULL,
+        min = 0,
+        nullable = TRUE,
+        vector = TRUE,
+        description = "Per-feature weights."
+      ),
+      nm = prop_string(NULL, nullable = TRUE, vector = TRUE)
+    )
+  )
+  x <- Vec(w = c(1, 2, 0.5), nm = c("a", "b"))
+  testthat::expect_length(x@w, 3L)
+  # Element-wise bounds still apply.
+  testthat::expect_error(Vec(w = c(1, -1)))
+  # NULL allowed when nullable.
+  testthat::expect_no_error(Vec())
+  # A vector property may be tunable; see the container-tunable tests below.
+  testthat::expect_no_error(prop_float(1, vector = TRUE, tunable = TRUE))
+  # Schema: array type (with null), items carry the scalar constraints.
+  s <- spec_to_schema(get_spec(Vec@properties[["w"]]))
+  testthat::expect_identical(as.character(s[["type"]]), c("array", "null"))
+  testthat::expect_identical(s[["items"]][["type"]], "number")
+  testthat::expect_identical(s[["items"]][["minimum"]], 0)
+  # Defaults are published separately, so no schema carries the keyword.
+  s1 <- spec_to_schema(get_spec(prop_string("a", vector = TRUE)))
+  testthat::expect_false("default" %in% names(s1))
+})
+
+
+# %% Container tunables ----
+testthat::test_that("a tunable array separates its value from its search space", {
+  Arch <- S7::new_class(
+    name = "Arch",
+    package = NULL,
+    properties = list(
+      hidden_units = prop_integer(
+        c(64L, 32L),
+        min = 1L,
+        vector = TRUE,
+        tunable = TRUE,
+        description = "Units per hidden layer."
+      )
+    )
+  )
+  # A bare vector is one value, of any length -- never a search space.
+  testthat::expect_identical(
+    Arch(hidden_units = c(12L, 6L, 2L))@hidden_units,
+    c(12L, 6L, 2L)
+  )
+  testthat::expect_identical(Arch(hidden_units = 8L)@hidden_units, 8L)
+  # A domain holds the candidates, one per argument.
+  testthat::expect_identical(
+    Arch(
+      hidden_units = tune_over(c(12L, 6L), c(14L, 12L, 6L))
+    )@hidden_units@candidates,
+    list(c(12L, 6L), c(14L, 12L, 6L))
+  )
+  # Element bounds reach inside each candidate, and the candidate is named in
+  # the message so the user knows which one failed.
+  testthat::expect_error(
+    Arch(hidden_units = tune_over(c(12L, 6L), c(4L, 0L))),
+    "candidate 2"
+  )
+  # A domain needs something to search.
+  testthat::expect_error(tune_over(8L), "at least two candidates")
+  # One bare vector is a single value of this hyperparameter, not a set of
+  # candidates, so it is corrected rather than read as two one-layer networks.
+  testthat::expect_error(
+    Arch(hidden_units = tune_over(c(48L, 24L))),
+    "single value"
+  )
+})
+
+
+testthat::test_that("a tunable property tags its search space", {
+  # Scalar: the value, or the tagged domain.
+  s0 <- spec_to_schema(get_spec(prop_integer(1L, min = 1L, tunable = TRUE)))
+  testthat::expect_identical(s0[["oneOf"]][[1L]][["type"]], "integer")
+  dom0 <- s0[["oneOf"]][[2L]]
+  testthat::expect_identical(dom0[["type"]], "object")
+  testthat::expect_identical(names(dom0[["properties"]]), "candidates")
+  testthat::expect_identical(
+    dom0[["properties"]][["candidates"]][["items"]][["type"]],
+    "integer"
+  )
+  # A domain of one is not a search, and the schema says so.
+  testthat::expect_identical(
+    dom0[["properties"]][["candidates"]][["minItems"]],
+    2L
+  )
+  testthat::expect_false(dom0[["additionalProperties"]])
+
+  # Vector-valued: one candidate is a whole array.
+  spec <- get_spec(prop_integer(1L, min = 1L, vector = TRUE, tunable = TRUE))
+  s <- spec_to_schema(spec)
+  testthat::expect_identical(s[["oneOf"]][[1L]][["type"]], "array")
+  dom <- s[["oneOf"]][[2L]]
+  testthat::expect_identical(dom[["type"]], "object")
+  testthat::expect_identical(
+    dom[["properties"]][["candidates"]][["items"]][["type"]],
+    "array"
+  )
+  # The tag makes this structurally distinct from a broadcast property, which
+  # emits arrays at both depths and was previously the identical shape.
+  testthat::expect_true(s[["x-rtemis"]][["tunable"]])
+  testthat::expect_null(s[["x-rtemis"]][["broadcast"]])
+  # Round trip: the value branch still leads, so the reader is unchanged.
+  back <- schema_to_spec(s, default = 1L)
+  testthat::expect_identical(back@container, "array")
+  testthat::expect_true(back@tunable)
+  testthat::expect_false(back@broadcast)
+  testthat::expect_identical(back@type, "integer")
+  testthat::expect_identical(back@minimum, 1L)
+})
+
+# %% Array arity: min_items / unique_items ----
+testthat::test_that("min_items and unique_items are enforced and published", {
+  p <- prop_string(
+    NULL,
+    nullable = TRUE,
+    vector = TRUE,
+    min_items = 2L,
+    unique_items = TRUE
+  )
+  Sel <- S7::new_class("Sel", properties = list(cols = p))
+  testthat::expect_error(Sel(cols = "a"), "at least 2 elements, but 1 given")
+  testthat::expect_error(Sel(cols = c("a", "a")), "duplicate values")
+  testthat::expect_no_error(Sel(cols = c("a", "b")))
+  # NULL is still unset, not an empty selection.
+  testthat::expect_no_error(Sel())
+
+  s <- spec_to_schema(get_spec(p))
+  testthat::expect_identical(s[["minItems"]], 2L)
+  testthat::expect_true(s[["uniqueItems"]])
+  # Standard keywords carry both, so neither is duplicated into `x-rtemis`.
+  testthat::expect_false("minItems" %in% names(s[["x-rtemis"]]))
+  testthat::expect_false("uniqueItems" %in% names(s[["x-rtemis"]]))
+})
+
+
+testthat::test_that("the default arity is published as before", {
+  s <- spec_to_schema(get_spec(prop_float(
+    NULL,
+    nullable = TRUE,
+    vector = TRUE
+  )))
+  testthat::expect_identical(s[["minItems"]], 1L)
+  testthat::expect_false("uniqueItems" %in% names(s))
+})
+
+
+testthat::test_that("array arity is rejected on non-array containers", {
+  # A scalar, a map and a matrix have no `minItems`/`uniqueItems` form, so a
+  # non-default value there would publish a constraint nothing enforces.
+  testthat::expect_error(prop_float(1, min_items = 2L), "only meaningful")
+  testthat::expect_error(
+    prop_string("a", unique_items = TRUE),
+    "only meaningful"
+  )
+  testthat::expect_error(
+    mk_spec(container = "map", items = mk_spec(), min_items = 2L),
+    "only meaningful"
+  )
+  testthat::expect_error(
+    mk_spec(container = "matrix", default = matrix(0), unique_items = TRUE),
+    "only meaningful"
+  )
+  # A broadcast scalar stands in for the whole array, so it cannot also be
+  # required to hold several elements.
+  testthat::expect_error(
+    prop_float(
+      NULL,
+      nullable = TRUE,
+      vector = TRUE,
+      broadcast = TRUE,
+      min_items = 2L
+    ),
+    "contradictory"
+  )
+  testthat::expect_error(prop_float(1, min_items = 0L), "single value >= 1")
+})
+
+
+# %% Spec introspection ----
+testthat::test_that("specs ride along on properties and derive tunability", {
+  props <- LightRFProps@properties
+  spec <- get_spec(props[["num_leaves"]])
+  testthat::expect_s7_class(spec, PropertySpec)
+  testthat::expect_identical(spec@type, "integer")
+  testthat::expect_identical(spec@minimum, 1L)
+  testthat::expect_true(spec@tunable)
+  # tunable/fixed vectors are now derivable -- no hand-maintained constants.
+  tunable <- names(Filter(function(p) get_spec(p)@tunable, props))
+  testthat::expect_true(all(
+    c("nrounds", "num_leaves", "feature_fraction", "ifw") %in% tunable
+  ))
+  testthat::expect_false(any(
+    c("objective", "device_type", "tree_learner", "force_col_wise") %in% tunable
+  ))
+})
+
+# %% spec_to_schema ----
+testthat::test_that("spec_to_schema maps bounds, nullability, tunability", {
+  props <- LightRFProps@properties
+  # Tunable numeric with exclusive bound -> oneOf [scalar, array].
+  s <- spec_to_schema(get_spec(props[["feature_fraction"]]))
+  testthat::expect_named(s, c("oneOf", "description", "x-rtemis"))
+  testthat::expect_identical(s[["oneOf"]][[1L]][["type"]], "number")
+  testthat::expect_identical(s[["oneOf"]][[1L]][["exclusiveMinimum"]], 0)
+  testthat::expect_identical(s[["oneOf"]][[1L]][["maximum"]], 1)
+  testthat::expect_identical(s[["oneOf"]][[2L]][["type"]], "object")
+  testthat::expect_identical(
+    s[["oneOf"]][[2L]][["properties"]][["candidates"]][["minItems"]],
+    2L
+  )
+  # Fixed enum string -> flat schema with enum.
+  s <- spec_to_schema(get_spec(props[["device_type"]]))
+  testthat::expect_identical(s[["type"]], "string")
+  testthat::expect_identical(as.character(s[["enum"]]), c("cpu", "gpu", "cuda"))
+  # Nullable fixed string -> type union with null.
+  s <- spec_to_schema(get_spec(props[["objective"]]))
+  testthat::expect_identical(as.character(s[["type"]]), c("string", "null"))
+})
+
+# %% S7_to_JSONSchema ----
+schema <- S7_to_JSONSchema(
+  LightRFProps,
+  id = "https://schema.rtemis.org/hyperparameters/r/lightrf/v1/schema.json",
+  title = "rtemis LightRFHyperparameters",
+  description = "Hyperparameters for the LightRF algorithm (LightGBM random forest mode).",
+  instance_schema_url = "https://schema.rtemis.org/hyperparameters/r/lightrf/v1/schema.json"
+)
+
+testthat::test_that("S7_to_JSONSchema assembles a complete schema", {
+  testthat::expect_identical(
+    schema[["$schema"]],
+    "https://json-schema.org/draft/2020-12/schema"
+  )
+  testthat::expect_false(schema[["additionalProperties"]])
+  # $schema const + all 15 declared properties.
+  testthat::expect_length(schema[["properties"]], 16L)
+  testthat::expect_identical(
+    schema[["properties"]][["$schema"]][["const"]],
+    "https://schema.rtemis.org/hyperparameters/r/lightrf/v1/schema.json"
+  )
+  testthat::expect_false(
+    "default" %in% names(schema[["properties"]][["nrounds"]])
+  )
+})
+
+testthat::test_that("empty schema description is omitted", {
+  Tiny <- S7::new_class(
+    name = "Tiny",
+    package = NULL,
+    properties = list(a = prop_boolean(TRUE))
+  )
+  s <- S7_to_JSONSchema(Tiny, id = "https://example.org/tiny.json")
+  testthat::expect_false("description" %in% names(s))
+  s <- S7_to_JSONSchema(
+    Tiny,
+    id = "https://example.org/tiny.json",
+    description = "A tiny config."
+  )
+  testthat::expect_identical(s[["description"]], "A tiny config.")
+})
+
+testthat::test_that("contains_min survives the schema round trip", {
+  # `schema_to_spec()` read `minItems` and `uniqueItems` but not
+  # `contains.minimum`, so a class rebuilt from its own published schema
+  # accepted a collection the original rejected.
+  A <- S7::new_class(
+    name = "A",
+    package = NULL,
+    properties = list(
+      x = prop_integer(2L, min = 1L, vector = TRUE, contains_min = 2L)
+    )
+  )
+  s <- S7_to_JSONSchema(A, id = "https://example.org/a.json")
+  testthat::expect_identical(
+    s[["properties"]][["x"]][["contains"]][["minimum"]],
+    2L
+  )
+  B <- JSONSchema_to_S7(s, name = "B", defaults = list(x = 2L))
+  testthat::expect_error(A(x = 1L))
+  testthat::expect_error(B(x = 1L))
+})
+
+
+testthat::test_that("contains_min covers a broadcast scalar", {
+  # Every element of a broadcast array is that scalar, so the bound applies to
+  # it. Without a threshold on the scalar branch the schema accepted what R
+  # rejected.
+  C <- S7::new_class(
+    name = "C",
+    package = NULL,
+    properties = list(
+      x = prop_integer(
+        2L,
+        min = 1L,
+        vector = TRUE,
+        broadcast = TRUE,
+        contains_min = 2L
+      )
+    )
+  )
+  s <- S7_to_JSONSchema(C, id = "https://example.org/c.json")
+  scalar_branch <- s[["properties"]][["x"]][["oneOf"]][[1L]]
+  testthat::expect_identical(scalar_branch[["minimum"]], 2L)
+  testthat::expect_error(C(x = 1L))
+})
+
+
+testthat::test_that("contains_min must be a finite scalar", {
+  # Validated at declaration, independently of the default: a nullable property
+  # with a NULL default never exercises its own bound, so an unusable one would
+  # reach the schema and fail only when a reader compiled it.
+  for (bad in list(numeric(0), c(2, 3), NA_real_, Inf, -Inf)) {
+    testthat::expect_error(
+      prop_integer(NULL, nullable = TRUE, vector = TRUE, contains_min = bad)
+    )
+  }
+  testthat::expect_no_error(
+    prop_integer(NULL, nullable = TRUE, vector = TRUE, contains_min = 2L)
+  )
+})
+
+
+testthat::test_that("an applies_when gate matches the sibling's declared shape", {
+  # Regression: the emitter chose the wire shape from `@tunable`, which decides
+  # whether a *search domain* is possible and says nothing about what a plain
+  # value looks like. That published a scalar `enum` against a vector-valued
+  # sibling -- making rtemis write records its own schema rejected -- and an
+  # array matcher against a domain that serializes as `{"candidates": [...]}`,
+  # an object matching neither branch.
+  Gated <- S7::new_class(
+    name = "Gated",
+    package = NULL,
+    properties = list(
+      vec = prop_integer(1L, vector = TRUE),
+      dom = prop_string("a", enum = c("a", "b"), tunable = TRUE),
+      on_vec = prop_integer(
+        NULL,
+        nullable = TRUE,
+        applies_when = list(vec = 1L)
+      ),
+      on_dom = prop_integer(
+        NULL,
+        nullable = TRUE,
+        applies_when = list(dom = "a")
+      )
+    )
+  )
+  s <- S7_to_JSONSchema(Gated, id = "https://example.org/gated.json")
+  then_of <- function(prop) {
+    for (cl in s[["allOf"]]) {
+      if (prop %in% names(cl[["if"]][["properties"]])) {
+        return(cl[["then"]][["properties"]])
+      }
+    }
+    NULL
+  }
+  # An array sibling is matched element-wise, never as a scalar enum.
+  vec_match <- then_of("on_vec")[["vec"]]
+  testthat::expect_identical(vec_match[["type"]], "array")
+  testthat::expect_identical(as.vector(vec_match[["contains"]][["enum"]]), 1L)
+  testthat::expect_false("enum" %in% names(vec_match))
+  # A tunable sibling admits its plain value or a tagged domain object.
+  dom_match <- then_of("on_dom")[["dom"]]
+  testthat::expect_length(dom_match[["anyOf"]], 2L)
+  tagged <- dom_match[["anyOf"]][[2L]]
+  testthat::expect_identical(tagged[["type"]], "object")
+  testthat::expect_identical(as.vector(tagged[["required"]]), "candidates")
+  testthat::expect_identical(
+    as.vector(tagged[["properties"]][["candidates"]][["contains"]][["enum"]]),
+    "a"
+  )
+})
+
+
+testthat::test_that("a gate on a sibling with no membership form is refused", {
+  Bad <- S7::new_class(
+    name = "Bad",
+    package = NULL,
+    properties = list(
+      m = prop_map(prop_integer(1L), nullable = TRUE),
+      g = prop_integer(NULL, nullable = TRUE, applies_when = list(m = 1L))
+    )
+  )
+  testthat::expect_error(
+    S7_to_JSONSchema(Bad, id = "https://example.org/bad.json"),
+    class = "rtemis_input_error"
+  )
+})
+
+
+testthat::test_that("a property with no declared role is an error", {
+  Mixed <- S7::new_class(
+    name = "Mixed",
+    package = NULL,
+    properties = list(
+      a = prop_boolean(TRUE),
+      b = S7::class_integer
+    )
+  )
+  testthat::expect_error(
+    S7_to_JSONSchema(Mixed, id = "https://example.org/x.json"),
+    "no declared role"
+  )
+  # `prop_state()` keeps it in the contract, marked readOnly: the class has
+  # the field, but a user never supplies it.
+  Stated <- S7::new_class(
+    name = "Stated",
+    package = NULL,
+    properties = list(
+      a = prop_boolean(TRUE),
+      b = prop_state(prop_integer(0L, min = 0L))
+    )
+  )
+  s <- S7_to_JSONSchema(Stated, id = "https://example.org/x.json")
+  testthat::expect_identical(names(s[["properties"]]), c("a", "b"))
+  testthat::expect_null(s[["properties"]][["a"]][["readOnly"]])
+  testthat::expect_true(s[["properties"]][["b"]][["readOnly"]])
+})
+
+testthat::test_that("an open-object property generates without `extra`", {
+  Bag <- S7::new_class(
+    name = "Bag",
+    package = NULL,
+    properties = list(
+      a = prop_boolean(TRUE),
+      b = prop_bag(description = "Backend parameters.")
+    )
+  )
+  s <- S7_to_JSONSchema(Bag, id = "https://example.org/x.json")
+  testthat::expect_setequal(names(s[["properties"]]), c("a", "b"))
+  testthat::expect_identical(s[["properties"]][["b"]][["type"]], "object")
+})
+
+testthat::test_that("prop_role classifies each declaration style", {
+  Roles <- S7::new_class(
+    name = "Roles",
+    package = NULL,
+    properties = list(
+      a = prop_boolean(TRUE),
+      b = prop_bag(),
+      c = prop_float(0, vector = TRUE, data_dependent = TRUE),
+      d = prop_state(prop_integer(0L)),
+      e = S7::class_integer
+    )
+  )
+  testthat::expect_identical(role_prop_names(Roles, "config"), c("a", "b", "c"))
+  testthat::expect_identical(role_prop_names(Roles, "state"), "d")
+  # Data-dependence is orthogonal to role: `c` is a declared config input whose
+  # value is tied to one dataset, so it is not written to a portable config.
+  testthat::expect_identical(data_dependent_prop_names(Roles), "c")
+  testthat::expect_true(is.na(prop_role(Roles@properties[["e"]])))
+})
+
+# %% What is written to a config ----
+testthat::test_that("everything settable is written; state is not", {
+  Axes <- S7::new_class(
+    name = "Axes",
+    package = NULL,
+    properties = list(
+      a = prop_boolean(TRUE),
+      # Data-shaped but still a settable input, so it is written: dropping a
+      # value the user supplied would lose it silently.
+      b = prop_float(0, vector = TRUE, data_dependent = TRUE),
+      # Written by the run and carried by the fitted model, so re-derived
+      # on read rather than stored.
+      c = prop_state(prop_integer(0L)),
+      # Determined by the class, so the algorithm already implies it.
+      d = prop_const(1L)
+    )
+  )
+  p <- Axes@properties
+  testthat::expect_true(prop_serialized(p[["a"]]))
+  testthat::expect_true(prop_serialized(p[["b"]]))
+  testthat::expect_false(prop_serialized(p[["c"]]))
+  testthat::expect_false(prop_serialized(p[["d"]]))
+  # `data_dependent` is a pure annotation: it marks a field a form should not
+  # prompt for, and says nothing about serialization.
+  s <- S7_to_JSONSchema(Axes, id = "https://example.org/x.json")
+  testthat::expect_true(s[["properties"]][["b"]][["x-rtemis"]][[
+    "data_dependent"
+  ]])
+  testthat::expect_null(s[["properties"]][["b"]][["readOnly"]])
+  testthat::expect_true(s[["properties"]][["c"]][["readOnly"]])
+})
+
+testthat::test_that("a flat config answers the same question as a family", {
+  # `PreprocessorConfig` has no `serializable_props` method of its own, so the
+  # default must apply the same rule rather than emitting whatever it holds.
+  cfg <- setup_Preprocessor(scale = TRUE, center = TRUE)
+  cfg@scale_centers <- c(a = 1.5, b = 2.5)
+  out <- serializable_props(cfg)
+  # `scale_centers` is a settable input `preprocess()` uses in place of
+  # computing, so it round-trips.
+  testthat::expect_true("scale_centers" %in% names(out))
+  testthat::expect_true("center" %in% names(out))
+})
+
+testthat::test_that("state the model carries is not written to a config", {
+  h <- setup_GLMNET()
+  h@`lambda.min` <- 0.03
+  testthat::expect_false("lambda.min" %in% names(serializable_props(h)))
+  # A value the user supplied *is* written: it is an input, and `id_strat`
+  # decides which cases stay together, so losing it changes results. What is
+  # written is the column's name -- one string any reader can act on -- rather
+  # than its values, which are true only of one dataset in one row order.
+  r <- setup_StratSub(
+    n_resamples = 2L,
+    id_strat = "subject"
+  )
+  testthat::expect_identical(serializable_props(r)[["id_strat"]], "subject")
+})
+
+# %% JSON round-trip ----
+testthat::test_that("schema serializes to JSON and round-trips", {
+  testthat::skip_if_not_installed("jsonlite")
+  tmpfile <- file.path(tempdir(), "lightrf.schema.json")
+  write_JSONSchema(schema, tmpfile, overwrite = TRUE, verbosity = 0L)
+  parsed <- jsonlite::fromJSON(tmpfile, simplifyVector = FALSE)
+  testthat::expect_identical(
+    parsed[["$id"]],
+    "https://schema.rtemis.org/hyperparameters/r/lightrf/v1/schema.json"
+  )
+  # enum stays an array even though scalar-unboxing is on.
+  testthat::expect_identical(
+    unlist(parsed[["properties"]][["device_type"]][["enum"]]),
+    c("cpu", "gpu", "cuda")
+  )
+  # tunable property round-trips as oneOf with a tagged candidates branch.
+  ff <- parsed[["properties"]][["feature_fraction"]]
+  testthat::expect_length(ff[["oneOf"]], 2L)
+  testthat::expect_identical(ff[["oneOf"]][[2L]][["type"]], "object")
+  testthat::expect_identical(
+    names(ff[["oneOf"]][[2L]][["properties"]]),
+    "candidates"
+  )
+  # nullable objective: type union survives.
+  testthat::expect_identical(
+    unlist(parsed[["properties"]][["objective"]][["type"]]),
+    c("string", "null")
+  )
+})
+
+
+# %% data_bound ----------------------------------------------------------------
+# `data_bound` declares that a value's valid range depends on the training data.
+# It is deliberately NOT enforced at construction time - there is no data yet -
+# but by check_data_bounds() via validate_hyperparameters(), which train() calls
+# before tuning. See DATA_BOUNDS in 010_Props.R.
+
+test_that("data_bound rejects names outside the vocabulary", {
+  expect_error(prop_integer(1L, data_bound = "n_bananas"))
+  expect_error(prop_float(1, data_bound = "n_bananas"))
+})
+
+test_that("feature_names is restricted to string properties", {
+  # A length bound applies to any type: a character vector of per-case IDs is
+  # bound by "n_cases".
+  expect_no_error(prop_string("a", vector = TRUE, data_bound = "n_cases"))
+  expect_error(prop_integer(1L, data_bound = "feature_names"))
+})
+
+test_that("data_bound does not constrain construction", {
+  # 100 is nonsense for any real dataset, but there is no dataset here.
+  expect_s7_class(setup_Ranger(mtry = 100L), RangerHyperparameters)
+  expect_length(setup_CART(cost = c(1, 2))[["cost"]], 2L)
+})
+
+test_that("data_bound is surfaced in the generated schema description", {
+  prop_schema <- function(cls, nm) {
+    spec_to_schema(get_spec(cls@properties[[nm]]))
+  }
+  expect_match(
+    prop_schema(RangerHyperparameters, "mtry")[["description"]],
+    "Cannot exceed the number of features"
+  )
+  expect_match(
+    prop_schema(CMeansConfig, "weights")[["description"]],
+    "must have one value per case"
+  )
+  expect_match(
+    prop_schema(RangerHyperparameters, "always_split_variables")[[
+      "description"
+    ]],
+    "must name training features"
+  )
+})
+
+# check_data_bounds ----
+n_cd <- 40L
+datc_bounds <- data.frame(
+  a = rnorm(n_cd),
+  b = rnorm(n_cd),
+  y = factor(sample(c("x", "z"), n_cd, replace = TRUE))
+)
+datr_bounds <- data.frame(a = rnorm(n_cd), b = rnorm(n_cd), y = rnorm(n_cd))
+
+test_that("check_data_bounds() bounds a scalar above by the dimension", {
+  expect_error(
+    check_data_bounds(setup_Ranger(mtry = 100L), datr_bounds),
+    class = "rtemis_range_error"
+  )
+  # Tunable hyperparameters carry the whole search space at this point, so a
+  # single bad value anywhere in it must abort.
+  expect_error(
+    check_data_bounds(setup_Ranger(mtry = tune_over(1L, 100L)), datr_bounds),
+    class = "rtemis_range_error"
+  )
+  expect_invisible(check_data_bounds(setup_Ranger(mtry = 2L), datr_bounds))
+})
+
+test_that("check_data_bounds() requires vector properties to match the dimension", {
+  expect_error(
+    check_data_bounds(setup_CART(cost = c(1, 2, 3)), datr_bounds),
+    class = "rtemis_length_error"
+  )
+  expect_invisible(check_data_bounds(setup_CART(cost = c(1, 2)), datr_bounds))
+})
+
+test_that("check_data_bounds() takes a broadcast scalar for the whole vector", {
+  # `CMeansConfig@weights` broadcasts: a scalar stands for every case, which
+  # is what its default is and what the published schema offers
+  # (`oneOf: [number, array]`). Checking its length against the case count
+  # rejected the contract's own shape, so every CMeans run on more than one
+  # case failed before reaching the backend -- and told the caller to supply
+  # what the scalar already meant.
+  expect_invisible(
+    check_data_bounds(setup_CMeans(k = 2L), datr_bounds, has_outcome = FALSE)
+  )
+  # Nor is the scalar an upper bound on the dimension: a case weight of 500
+  # over 40 cases is a weight, not an out-of-range index.
+  expect_invisible(
+    check_data_bounds(
+      setup_CMeans(k = 2L, weights = 500),
+      datr_bounds,
+      has_outcome = FALSE
+    )
+  )
+  # A vector still has to match, which is the whole point of the bound.
+  expect_error(
+    check_data_bounds(
+      setup_CMeans(k = 2L, weights = rep(1, 5L)),
+      datr_bounds,
+      has_outcome = FALSE
+    ),
+    class = "rtemis_length_error"
+  )
+  expect_invisible(
+    check_data_bounds(
+      setup_CMeans(k = 2L, weights = rep(1, n_cd)),
+      datr_bounds,
+      has_outcome = FALSE
+    )
+  )
+})
+
+
+test_that("check_data_bounds() checks feature_names by membership", {
+  expect_error(
+    check_data_bounds(
+      setup_Ranger(always_split_variables = c("a", "nope")),
+      datr_bounds
+    ),
+    class = "rtemis_value_error"
+  )
+  expect_invisible(
+    check_data_bounds(setup_Ranger(always_split_variables = "a"), datr_bounds)
+  )
+})
+
+test_that("numeric_feature_names excludes non-numeric features", {
+  # `features` is declared on DecompositionConfig, so this also exercises a
+  # non-Hyperparameters config and the `prop()` accessor: a family's `[[`
+  # routes into its computed payload list, which excludes base properties.
+  feat <- data.frame(a = rnorm(6L), b = rnorm(6L), f = factor(letters[1:6]))
+  expect_error(
+    check_data_bounds(
+      setup_PCA(k = 2L, features = c("a", "f")),
+      feat,
+      has_outcome = FALSE
+    ),
+    "must name numeric training features"
+  )
+  expect_error(
+    check_data_bounds(
+      setup_PCA(k = 2L, features = c("a", "nope")),
+      feat,
+      has_outcome = FALSE
+    ),
+    class = "rtemis_value_error"
+  )
+  expect_invisible(
+    check_data_bounds(
+      setup_PCA(k = 2L, features = c("a", "b")),
+      feat,
+      has_outcome = FALSE
+    )
+  )
+  # Unset is skipped: NULL means "all numeric features", resolved later.
+  expect_invisible(
+    check_data_bounds(setup_PCA(k = 2L), feat, has_outcome = FALSE)
+  )
+})
+
+test_that("has_outcome = FALSE keeps the last column as a feature", {
+  # The supervised convention would silently drop `b` from every dimension.
+  feat <- data.frame(a = rnorm(4L), b = rnorm(4L))
+  expect_identical(
+    rtemis:::resolve_data_bounds(feat, has_outcome = FALSE)[["feature_names"]],
+    c("a", "b")
+  )
+  expect_identical(
+    rtemis:::resolve_data_bounds(feat)[["feature_names"]],
+    "a"
+  )
+  expect_null(rtemis:::resolve_data_bounds(feat, has_outcome = FALSE)[[
+    "n_classes"
+  ]])
+})
+
+test_that("a name bound is restricted to string properties", {
+  expect_error(
+    prop_integer(1L, data_bound = "numeric_feature_names"),
+    "only supported for type 'string'"
+  )
+})
+
+test_that("check_data_bounds() skips unset values and n_classes in regression", {
+  expect_invisible(check_data_bounds(setup_Ranger(), datr_bounds))
+  # class_weights is bound to n_classes, which is undefined for a numeric
+  # outcome: the declaration does not apply rather than erroring.
+  expect_invisible(
+    check_data_bounds(setup_Ranger(class_weights = c(1, 2, 3)), datr_bounds)
+  )
+  expect_error(
+    check_data_bounds(setup_Ranger(class_weights = c(1, 2, 3)), datc_bounds),
+    class = "rtemis_length_error"
+  )
+})
+
+
+# %% Map containers on the wire ----
+test_that("a map property round-trips as a JSON object, not an array", {
+  # `jsonlite` drops names on atomic vectors, so a named numeric would emit an
+  # array and fail its own schema, which declares `type: object`.
+  cfg <- setup_Preprocessor(scale = TRUE)
+  cfg@scale_centers <- c(a = 1.5, b = 2.5)
+  wire <- S7_to_list(serializable_props(cfg))[["scale_centers"]]
+  expect_type(wire, "list")
+  expect_identical(names(wire), c("a", "b"))
+  expect_match(
+    as.character(jsonlite::toJSON(wire, auto_unbox = TRUE)),
+    "^\\{",
+    info = "must serialize as an object"
+  )
+  # And back: JSON objects parse to named lists, but the property is a named
+  # atomic vector.
+  restored <- .list_to_PreprocessorConfig(list(
+    scale = TRUE,
+    scale_centers = list(a = 1.5, b = 2.5)
+  ))
+  expect_identical(restored@scale_centers, c(a = 1.5, b = 2.5))
+})
+
+test_that("wire_value only reshapes maps, not any named vector", {
+  # Ranger's class_weights is a named numeric declaring an *array*: naming it
+  # must not change its wire type.
+  arr <- RangerHyperparameters@properties[["class_weights"]]
+  named <- c(setosa = 1, versicolor = 2)
+  expect_identical(wire_value(named, arr), named)
+  map <- PreprocessorConfig@properties[["scale_centers"]]
+  expect_type(wire_value(named, map), "list")
+})
+
+
+# %% table container ----
+
+# One spec reused across the table tests: an always-present numeric column, an
+# optional one (a metric computed only for some tasks), and a label.
+demo_table_prop <- function(...) {
+  prop_table(
+    columns = list(
+      accuracy = prop_float(0, min = 0, max = 1, description = "Accuracy."),
+      auc = prop_float(0, min = 0, max = 1, nullable = TRUE),
+      label = prop_string("")
+    ),
+    required = c("accuracy", "label"),
+    nullable = TRUE,
+    description = "One row per resample.",
+    ...
+  )
+}
+
+
+demo_table_class <- function() {
+  new_class("DemoTable", properties = list(overall = demo_table_prop()))
+}
+
+
+test_that("a table property accepts a conforming data frame", {
+  Demo <- demo_table_class()
+  df <- data.frame(
+    accuracy = c(0.9, 0.8),
+    auc = c(0.81, NA),
+    label = c("f1", "f2")
+  )
+  expect_identical(Demo(overall = df)@overall, df)
+  # An optional column may be absent entirely: the metric was not computed for
+  # this task, which is not the same as being invalid.
+  expect_no_error(Demo(overall = data.frame(accuracy = 0.9, label = "f1")))
+})
+
+
+test_that("a table property rejects malformed frames", {
+  Demo <- demo_table_class()
+  expect_error(
+    Demo(overall = data.frame(accuracy = 1.4, label = "x")),
+    "must be <= 1"
+  )
+  expect_error(
+    Demo(overall = data.frame(accuracy = 0.9, label = "x", oops = 1)),
+    "undeclared column"
+  )
+  expect_error(
+    Demo(overall = data.frame(accuracy = 0.9)),
+    "missing required column"
+  )
+  expect_error(
+    Demo(overall = data.frame(accuracy = "high", label = "x")),
+    "must be of type 'number'"
+  )
+  # NA is allowed only where the cell spec says so.
+  expect_error(
+    Demo(overall = data.frame(accuracy = NA_real_, label = "x")),
+    "must not contain missing values"
+  )
+  expect_no_error(
+    Demo(overall = data.frame(accuracy = 0.9, auc = NA_real_, label = "x"))
+  )
+  # S7's own class check fires before the validator for a non-frame.
+  expect_error(Demo(overall = list(accuracy = 0.9)), "data\\.frame")
+})
+
+
+test_that("a table declaration is itself checked", {
+  expect_error(prop_table(columns = list()), "non-empty named list")
+  expect_error(
+    prop_table(columns = list(prop_float(0))),
+    "non-empty named list"
+  )
+  expect_error(
+    prop_table(columns = list(a = "not a prop")),
+    "must be a property built by a prop_\\* factory"
+  )
+  # A cell is a scalar: a column of containers has no row-oriented encoding.
+  expect_error(
+    prop_table(columns = list(a = prop_float(0, vector = TRUE))),
+    "must describe a scalar cell"
+  )
+  expect_error(
+    prop_table(columns = list(a = prop_float(0)), required = "b"),
+    "undeclared members"
+  )
+})
+
+
+test_that("a table emits a row-oriented schema", {
+  spec <- get_spec(demo_table_prop())
+  sch <- spec_to_schema(spec)
+  expect_identical(as.character(sch[["type"]]), c("array", "null"))
+  row <- sch[["items"]]
+  expect_identical(row[["type"]], "object")
+  expect_false(row[["additionalProperties"]])
+  # Every declared column is published; only the always-present ones are
+  # required, which is what makes an absent optional column legal.
+  expect_identical(names(row[["properties"]]), c("accuracy", "auc", "label"))
+  expect_identical(as.character(row[["required"]]), c("accuracy", "label"))
+  expect_identical(row[["properties"]][["accuracy"]][["maximum"]], 1)
+  expect_identical(
+    as.character(row[["properties"]][["auc"]][["type"]]),
+    c("number", "null")
+  )
+  expect_identical(sch[["x-rtemis"]][["container"]], "table")
+})
+
+
+test_that("a table round-trips through its schema", {
+  orig <- get_spec(demo_table_prop())
+  back <- schema_to_spec(spec_to_schema(orig))
+  expect_identical(back@container, "table")
+  expect_identical(back@nullable, orig@nullable)
+  expect_identical(back@required_members, orig@required_members)
+  expect_identical(names(back@members), names(orig@members))
+  for (nm in names(orig@members)) {
+    a <- orig@members[[nm]]
+    b <- back@members[[nm]]
+    expect_identical(b@type, a@type)
+    expect_identical(b@minimum, a@minimum)
+    expect_identical(b@maximum, a@maximum)
+    expect_identical(b@nullable, a@nullable)
+  }
+})
+
+
+test_that("a class rebuilt from a published schema validates tables alike", {
+  Demo <- demo_table_class()
+  sch <- S7_to_JSONSchema(
+    Demo,
+    id = "https://schema.rtemis.org/r/demo_table/v1/schema.json"
+  )
+  Rebuilt <- JSONSchema_to_S7(sch, name = "DemoTableRebuilt")
+  expect_no_error(Rebuilt(overall = data.frame(accuracy = 0.9, label = "f1")))
+  expect_error(
+    Rebuilt(overall = data.frame(accuracy = 2, label = "x")),
+    "must be <= 1"
+  )
+  expect_error(
+    Rebuilt(overall = data.frame(accuracy = 0.9)),
+    "missing required column"
+  )
+})
+
+
+test_that("a table serializes row-oriented, keeping absent and null distinct", {
+  df <- data.frame(
+    accuracy = c(0.9, 0.8),
+    auc = c(0.81, NA),
+    label = c("f1", "f2")
+  )
+  # The write path's options, which decide this: an undefined cell must reach
+  # the wire as `null`, not as a missing key, or it would be indistinguishable
+  # from a column that was never computed.
+  json <- as.character(jsonlite::toJSON(df, auto_unbox = TRUE, na = "null"))
+  expect_match(json, '^\\[\\{"accuracy":0\\.9')
+  expect_match(json, '"auc":null')
+  restored <- jsonlite::fromJSON(json)
+  expect_identical(restored, df)
+  # A column never computed is simply absent from every row.
+  absent <- as.character(jsonlite::toJSON(
+    data.frame(accuracy = 0.9, label = "f1"),
+    auto_unbox = TRUE,
+    na = "null"
+  ))
+  expect_false(grepl("auc", absent, fixed = TRUE))
+})
+
+
+# %% struct container ----
+
+demo_struct_prop <- function() {
+  prop_struct(
+    members = list(
+      overall = prop_table(
+        columns = list(
+          balanced_accuracy = prop_float(0, min = 0, max = 1),
+          auc = prop_float(0, min = 0, max = 1, nullable = TRUE)
+        ),
+        required = "balanced_accuracy",
+        nullable = TRUE
+      ),
+      positive_class = prop_string(NULL, nullable = TRUE)
+    ),
+    nullable = TRUE,
+    description = "Classification metrics payload."
+  )
+}
+
+
+demo_struct_class <- function() {
+  new_class("DemoStruct", properties = list(metrics = demo_struct_prop()))
+}
+
+
+test_that("a struct property validates its declared fields", {
+  Demo <- demo_struct_class()
+  ok <- list(
+    overall = data.frame(balanced_accuracy = 0.9, auc = 0.8),
+    positive_class = "a"
+  )
+  expect_no_error(Demo(metrics = ok))
+  expect_error(
+    Demo(metrics = list(overall = ok[["overall"]])),
+    "positive_class"
+  )
+  expect_error(
+    Demo(metrics = c(ok, list(oops = 1))),
+    "undeclared field\\(s\\) 'oops'"
+  )
+  expect_error(Demo(metrics = "not a list"), "list")
+})
+
+
+test_that("a struct's members may themselves be containers", {
+  # This is what separates a struct from a table: a field can be a whole table,
+  # and the error names the path to the offending cell.
+  Demo <- demo_struct_class()
+  expect_error(
+    Demo(
+      metrics = list(
+        overall = data.frame(balanced_accuracy = 1.5),
+        positive_class = "a"
+      )
+    ),
+    "field 'overall' column 'balanced_accuracy' must be <= 1"
+  )
+  expect_error(
+    Demo(
+      metrics = list(
+        overall = data.frame(auc = 0.5),
+        positive_class = "a"
+      )
+    ),
+    "field 'overall' is missing required column\\(s\\) 'balanced_accuracy'"
+  )
+})
+
+
+test_that("a struct declaration is itself checked", {
+  expect_error(prop_struct(members = list()), "non-empty named list")
+  expect_error(
+    prop_struct(members = list(a = "not a prop")),
+    "must be a property built by a prop_\\* factory"
+  )
+  expect_error(
+    prop_struct(members = list(a = prop_float(0)), required = "b"),
+    "undeclared members"
+  )
+})
+
+
+test_that("a non-nullable struct declares no default and requires a value", {
+  property <- prop_struct(list(a = prop_integer(1L)))
+  expect_false(get_spec(property)@default_present)
+  Test <- S7::new_class("RequiredStruct", properties = list(x = property))
+  expect_error(Test(), "requires an explicit value")
+  expect_identical(Test(x = list(a = 2L))@x, list(a = 2L))
+})
+
+
+test_that("a struct emits an object schema and round-trips", {
+  orig <- get_spec(demo_struct_prop())
+  sch <- spec_to_schema(orig)
+  expect_identical(as.character(sch[["type"]]), c("object", "null"))
+  expect_false(sch[["additionalProperties"]])
+  expect_identical(
+    as.character(sch[["required"]]),
+    c("overall", "positive_class")
+  )
+  expect_identical(sch[["x-rtemis"]][["container"]], "struct")
+  # The nested table keeps its own container annotation.
+  expect_identical(
+    sch[["properties"]][["overall"]][["x-rtemis"]][["container"]],
+    "table"
+  )
+  back <- schema_to_spec(sch)
+  expect_identical(back@container, "struct")
+  expect_identical(back@required_members, orig@required_members)
+  expect_identical(names(back@members), names(orig@members))
+  expect_identical(back@members[["overall"]]@container, "table")
+  expect_identical(
+    back@members[["overall"]]@required_members,
+    orig@members[["overall"]]@required_members
+  )
+})
+
+
+test_that("a class rebuilt from a published schema validates structs alike", {
+  Demo <- demo_struct_class()
+  sch <- S7_to_JSONSchema(
+    Demo,
+    id = "https://schema.rtemis.org/r/demo_struct/v1/schema.json"
+  )
+  Rebuilt <- JSONSchema_to_S7(sch, name = "DemoStructRebuilt")
+  expect_no_error(Rebuilt(
+    metrics = list(
+      overall = data.frame(balanced_accuracy = 0.9),
+      positive_class = "a"
+    )
+  ))
+  expect_error(
+    Rebuilt(
+      metrics = list(
+        overall = data.frame(balanced_accuracy = 3),
+        positive_class = "a"
+      )
+    ),
+    "field 'overall' column 'balanced_accuracy' must be <= 1"
+  )
+})
+
+
+# %% r_only role ----
+
+test_that("an r_only property is neither serialized nor published", {
+  p <- prop_r_only(new_property(class_any))
+  expect_identical(prop_role(p), "r_only")
+  expect_false(prop_serialized(p))
+  expect_identical(prop_role(Supervised@properties[["session_info"]]), "r_only")
+  expect_false(prop_serialized(Supervised@properties[["session_info"]]))
+  expect_identical(prop_role(Supervised@properties[["model"]]), "runtime")
+  expect_false(prop_serialized(Supervised@properties[["model"]]))
+  expect_false(prop_published(Supervised@properties[["model"]]))
+})
+
+
+test_that("r_only is marked, never inferred", {
+  # A spec-less, role-less property is drift and must still fail loudly: the
+  # marker exists so that adding a property and forgetting to declare it is not
+  # silently treated as "R-only".
+  Drifty <- new_class("Drifty", properties = list(mystery = class_any))
+  expect_error(
+    S7_to_JSONSchema(
+      Drifty,
+      id = "https://schema.rtemis.org/r/drifty/v1/schema.json"
+    ),
+    "mystery"
+  )
+})
+
+
+# %% Published properties ----
+
+test_that("prop_published() is true for config and state, false for the rest", {
+  expect_true(prop_published(prop_float(0)))
+  expect_true(prop_published(prop_state(prop_float(0))))
+  expect_false(prop_published(prop_computed(new_property(class_any))))
+  expect_false(prop_published(prop_r_only(new_property(class_any))))
+  # A property that has not been migrated to the factories keeps serializing as
+  # it always did; schema generation is where that drift is caught.
+  expect_true(prop_published(new_property(class_any)))
+})
+
+
+test_that("the default to_json omits computed and r_only properties", {
+  keys <- names(to_json(data_fingerprint(iris)))
+  expect_true("method" %in% keys)
+  # Stored, not computed: what produced a digest is not recoverable from the
+  # other fields, so a consumer would lose it if these were views.
+  expect_true(all(c("encoding", "language", "data_structure") %in% keys))
+  # `confusion_matrix` is a function of `confusion_long`, so a consumer loses
+  # nothing by its absence.
+  computed <- classification_metrics(
+    factor(c("a", "a", "b", "b")),
+    factor(c("a", "b", "b", "b")),
+    c(0.3, 0.6, 0.75, 0.8)
+  )
+  expect_false("confusion_matrix" %in% names(to_json(computed)))
+})
+
+
+# %% factor container ----
+
+demo_factor_class <- function(...) {
+  new_class(
+    "DemoFactor",
+    properties = list(y = prop_factor(nullable = TRUE, ...))
+  )
+}
+
+
+test_that("a factor property accepts a factor and rejects its labels", {
+  Demo <- demo_factor_class()
+  y <- factor(c("a", "b", "a"))
+  expect_identical(Demo(y = y)@y, y)
+  # A character vector is not a factor: the two carry different information
+  # (the level set), so accepting one for the other would lose it silently.
+  expect_error(Demo(y = c("a", "b")), "factor")
+  expect_error(Demo(y = factor(c("a", NA))), "missing values")
+  expect_null(Demo()@y)
+})
+
+
+test_that("a factor property honors a declared level set", {
+  Demo <- demo_factor_class(enum = c("no", "yes"))
+  expect_no_error(Demo(y = factor(c("yes", "no"))))
+  expect_error(Demo(y = factor(c("maybe"))), "must be one of")
+})
+
+
+test_that("a factor emits its levels and codes, and the spec round-trips", {
+  spec <- get_spec(prop_factor(nullable = TRUE, description = "Outcome."))
+  sch <- spec_to_schema(spec)
+  expect_identical(as.character(sch[["type"]]), c("object", "null"))
+  expect_identical(as.character(sch[["required"]]), c("levels", "codes"))
+  expect_true(sch[["properties"]][["levels"]][["uniqueItems"]])
+  # Codes are 1-based positions, which the schema asserts rather than leaving
+  # to prose: a 0-based reader would shift every label by one.
+  expect_identical(sch[["properties"]][["codes"]][["items"]][["minimum"]], 1L)
+  expect_identical(sch[["x-rtemis"]][["container"]], "factor")
+  back <- schema_to_spec(sch)
+  expect_identical(back@container, "factor")
+  expect_identical(back@type, "string")
+  expect_true(back@nullable)
+})
+
+
+test_that("a declared level set constrains the levels in the schema", {
+  spec <- get_spec(prop_factor(enum = c("no", "yes"), nullable = TRUE))
+  sch <- spec_to_schema(spec)
+  expect_identical(
+    as.character(sch[["properties"]][["levels"]][["items"]][["enum"]]),
+    c("no", "yes")
+  )
+})
+
+
+test_that("a required factor has no fabricated declaration default", {
+  property <- prop_factor()
+  expect_false(get_spec(property)@default_present)
+  Demo <- new_class("RequiredFactor", properties = list(y = property))
+  expect_error(Demo(), "explicit value")
+  expect_identical(Demo(y = factor("a"))@y, factor("a"))
+})
+
+
+test_that("a factor survives the wire with its level order and empty levels", {
+  prop <- prop_factor(nullable = TRUE)
+  # Level order is not cosmetic: `binclasspos = 2L` means the positive class is
+  # the *second* level, so a realphabetised factor has swapped which class is
+  # positive.
+  reordered <- factor(c("b", "a", "b"), levels = c("b", "a"))
+  wire <- wire_value(reordered, prop)
+  expect_identical(unclass(wire[["levels"]]), c("b", "a"))
+  expect_identical(unclass(wire[["codes"]]), c(1L, 2L, 1L))
+  expect_identical(from_wire_factor(wire), reordered)
+  # A level with no cases disappears entirely from an array of labels.
+  unobserved <- factor(c("a", "a"), levels = c("a", "b", "c"))
+  expect_identical(
+    from_wire_factor(wire_value(unobserved, prop)),
+    unobserved
+  )
+})
+
+
+test_that("factor codes that index past the levels are rejected", {
+  expect_error(
+    from_wire_factor(list(levels = c("a", "b"), codes = c(1L, 3L))),
+    "1-based"
+  )
+})
+
+
+test_that("from_wire rebuilds a factor property", {
+  Demo <- demo_factor_class()
+  parsed <- list(y = list(levels = c("b", "a"), codes = c(2L, 1L)))
+  restored <- from_wire(parsed, Demo)
+  expect_identical(restored[["y"]], factor(c("a", "b"), levels = c("b", "a")))
+  expect_no_error(Demo(y = restored[["y"]]))
+})
+
+
+# %% applies_when ----
+test_that("applies_when requires nullable", {
+  # NULL is how a property that does not apply is expressed, so a property that
+  # cannot hold NULL has no way to be inapplicable.
+  expect_error(
+    prop_float(1, applies_when = list(kernel = "radial")),
+    "nullable"
+  )
+})
+
+
+test_that("applies_when rejects a malformed gate", {
+  expect_error(
+    prop_float(NULL, nullable = TRUE, applies_when = list()),
+    "at least one"
+  )
+  expect_error(
+    prop_float(NULL, nullable = TRUE, applies_when = list("radial")),
+    "fully named"
+  )
+  # NA marks a gated-off grid cell, so it can never be a value that opens a gate.
+  expect_error(
+    prop_float(NULL, nullable = TRUE, applies_when = list(kernel = NA)),
+    "without NA"
+  )
+  expect_error(
+    prop_float(
+      NULL,
+      nullable = TRUE,
+      applies_when = list(kernel = character())
+    ),
+    "non-empty"
+  )
+})
+
+
+test_that("applies_when reaches the schema and the description", {
+  spec <- get_spec(rtemis:::HALHyperparameters@properties[["reduce_basis"]])
+  schema <- rtemis:::spec_to_schema(spec)
+  expect_identical(
+    schema[["x-rtemis"]][["applies_when"]],
+    list(smoothness_orders = 0L)
+  )
+  # A reader that renders only descriptions still learns the value is
+  # conditional.
+  expect_match(
+    schema[["description"]],
+    "Applies only when smoothness_orders is 0\\.$"
+  )
+})
+
+
+test_that("the applies_when note spells its values as JSON, not as R", {
+  # The note is published, so it must name the value a reader would write:
+  # `true`, not `TRUE`, and a quoted string, which is also what distinguishes
+  # the two once R's casing is gone.
+  bool_gate <- get_spec(
+    rtemis:::LightGBMHyperparameters@properties[["linear_lambda"]]
+  )
+  expect_match(
+    rtemis:::spec_to_schema(bool_gate)[["description"]],
+    "Applies only when linear_tree is true\\.$"
+  )
+  enum_gate <- get_spec(
+    rtemis:::LINADHyperparameters@properties[["nvmax"]]
+  )
+  expect_match(
+    rtemis:::spec_to_schema(enum_gate)[["description"]],
+    'Applies only when node_model is "forward"\\.$'
+  )
+  # The R-facing validator message is the other audience and keeps R's own
+  # spelling, since it tells an R caller what to set: unquoted there, and
+  # `TRUE` rather than `true` for a boolean gate.
+  expect_error(
+    setup_LINAD(node_model = "ridge", nvmax = 3L),
+    "is forward",
+    fixed = TRUE
+  )
+  expect_identical(rtemis:::format_allowed(TRUE), "TRUE")
+  expect_identical(rtemis:::format_allowed(TRUE, json = TRUE), "true")
+})
+
+
+test_that("every applies_when gate names a real, ungated sibling", {
+  # Reads every class in the namespace; depends only on the package source,
+  # and CI runs it.
+  skip_on_cran()
+  # A gate naming a missing property would fail only when that class is
+  # constructed; a chain of gates would need a topological sort in every form
+  # builder that reads the schema.
+  for (cls in spec_classes()) {
+    gated <- rtemis:::applies_when_spec_names(cls)
+    for (nm in gated) {
+      gate <- rtemis:::get_spec_fields(cls@properties[[nm]])[["applies_when"]]
+      label <- paste0(cls@name, "@", nm)
+      expect_false(nm %in% names(gate), info = label)
+      expect_true(all(names(gate) %in% names(cls@properties)), info = label)
+      expect_length(intersect(names(gate), gated), 0L)
+    }
+  }
+})
+
+
+test_that("no class redeclares an inherited property with a different default", {
+  # Reads every class in the namespace; depends only on the package source,
+  # and CI runs it.
+  skip_on_cran()
+  # S7 records a subclass's redeclared property on the class but generates the
+  # constructor with the *parent's* default, so the two disagree in silence:
+  #
+  #   B <- new_class("B", parent = A, properties = list(x = new_property(default = 99)))
+  #   B@properties$x$default   # 99  <- what the schema and defaults artifact read
+  #   B()@x                    #  1  <- what actually runs
+  #
+  # A published default that no run can produce is worse than a missing one, so
+  # the pattern is banned outright rather than worked around. It is what decides
+  # which properties an intermediate class such as `LightFamilyHyperparameters`
+  # may hold: only those the whole family defaults the same way.
+  #
+  # Getters are exempt -- those do override, which is what `prop_algorithm()`
+  # relies on to stamp each leaf with its own name.
+  for (cls in spec_classes()) {
+    parent <- cls@parent
+    while (
+      inherits(parent, "S7_class") && !identical(parent@name, "S7_object")
+    ) {
+      shared <- intersect(names(cls@properties), names(parent@properties))
+      for (nm in shared) {
+        child <- cls@properties[[nm]]
+        inherited <- parent@properties[[nm]]
+        if (!is.null(child[["getter"]]) || !is.null(inherited[["getter"]])) {
+          next
+        }
+        expect_identical(
+          child[["default"]],
+          inherited[["default"]],
+          info = paste0(
+            cls@name,
+            "@",
+            nm,
+            " redeclares ",
+            parent@name,
+            "'s default; S7 keeps the parent's at construction, so the class ",
+            "would publish a value it cannot produce. Leave the property on ",
+            "the leaf instead."
+          )
+        )
+      }
+      parent <- parent@parent
+    }
+  }
+})
+
+
+test_that("a spec field a build does not know is dropped, not fatal", {
+  # Specs cross versions: a worker loads the installed package while the session
+  # may run a newer one, and a saved model outlives the rtemis that wrote it.
+  # Every spec field is either an annotation for readers or a bound the
+  # property's own validator closure already enforces, so an unknown one costs
+  # metadata and nothing else -- while aborting costs the run, and does it far
+  # from the cause. Adding `group` surfaced this as "All 4 tuning grid cells
+  # failed", naming neither the field nor the version skew.
+  fields <- get_spec_fields(prop_float(1, min = 0))
+  fields[["from_a_newer_rtemis"]] <- "x"
+  expect_warning(
+    spec <- spec_object(fields),
+    "does not know: from_a_newer_rtemis"
+  )
+  # The fields this build does know survive intact.
+  expect_identical(spec@type, "number")
+  expect_identical(spec@minimum, 0)
+  # And a spec with nothing unknown reads silently.
+  expect_silent(spec_object(get_spec_fields(prop_float(1, min = 0))))
+})
+
+
+test_that("a declaration group reaches the property and the schema", {
+  # The group is a fact about where a property is declared -- stamped by the
+  # factory that declares it -- so a form builder can render one section per
+  # group without any interface curating its own list.
+  props <- prop_group(
+    list(a = prop_float(1, min = 0), b = prop_boolean(FALSE)),
+    "objective"
+  )
+  expect_identical(get_spec_fields(props[["a"]])[["group"]], "objective")
+  expect_identical(get_spec_fields(props[["b"]])[["group"]], "objective")
+  # Ungrouped stays unset, so nothing about an existing class changes.
+  expect_null(get_spec_fields(prop_float(1, min = 0))[["group"]])
+  # A property not built by a factory has no spec to stamp.
+  expect_error(
+    prop_group(list(a = new_property(class_numeric)), "objective"),
+    "built by a prop_\\* factory"
+  )
+  # It is published, so a reader outside R can see it.
+  cls <- new_class("GroupedTestConfig", properties = props)
+  schema <- S7_to_JSONSchema(cls, id = "https://x/v1/schema.json")
+  expect_identical(
+    schema[["properties"]][["a"]][["x-rtemis"]][["group"]],
+    "objective"
+  )
+})

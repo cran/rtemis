@@ -1,0 +1,1124 @@
+# 180_Session.R
+# ::rtemis::
+# 2026- EDG rtemis.org
+
+# Observability session: captures the execution graph of a train() run as a flat,
+# append-only list of node records. See specs/observability.md for the full design.
+
+# %% SupervisedSession ----
+#' SupervisedSession Class
+#'
+#' @description
+#' Execution observability session for a `train()` run. Holds the run's unique id and
+#' the flat, append-only event log from which the execution graph (tree/DAG) is
+#' reconstructed via each record's `parent_id`.
+#'
+#' @details
+#' Each element of `@events` is a list with fields: `node_id`, `parent_id`, `kind`,
+#' `label`, `status` (one of `"running"`, `"ok"`, `"error"`, `"aborted"`), `t_start`,
+#' `t_end`, and `meta` (kind-specific payload).
+#'
+#' @author EDG
+#' @noRd
+SupervisedSession <- new_class(
+  name = "SupervisedSession",
+  package = "rtemis",
+  properties = list(
+    id = class_character,
+    events = class_list,
+    # Wall-clock bounds of the run. `finished` is unset while a session is
+    # still open, which `session_timeline()` treats as "draw up to the latest
+    # recorded start".
+    started = NULL | class_POSIXct,
+    finished = NULL | class_POSIXct
+  ),
+  constructor = function(id, events = list(), started = NULL, finished = NULL) {
+    new_object(
+      S7::S7_object(),
+      id = id,
+      events = events,
+      started = started,
+      finished = finished
+    )
+  }
+) # /rtemis::SupervisedSession
+
+
+# %% repr.SupervisedSession ----
+method(repr, SupervisedSession) <- function(x, pad = 0L, output_type = NULL) {
+  out <- repr_S7name("SupervisedSession", pad = pad, output_type = output_type)
+  events <- x@events
+  if (length(events) == 0L) {
+    return(paste0(
+      out,
+      strrep(" ", pad + 2L),
+      gray("(no events recorded)", output_type = output_type),
+      "\n"
+    ))
+  }
+  # Index records by node_id and collect children per parent.
+  ids <- vapply(events, \(e) e[["node_id"]], character(1L))
+  by_id <- stats::setNames(events, ids)
+  parents <- vapply(
+    events,
+    function(e) {
+      p <- e[["parent_id"]]
+      if (is.null(p)) NA_character_ else p
+    },
+    character(1L)
+  )
+  children <- split(ids, factor(parents, levels = unique(parents)))
+  roots <- ids[is.na(parents)]
+  # Recursively render the tree.
+  render_node <- function(node_id, depth) {
+    rec <- by_id[[node_id]]
+    indent <- strrep("  ", depth + 1L)
+    glyph <- session_status_glyph(rec[["status"]], output_type = output_type)
+    dur <- session_format_duration(rec[["t_start"]], rec[["t_end"]])
+    line <- paste0(
+      indent,
+      glyph,
+      " ",
+      fmt(rec[["kind"]], col = col_info, output_type = output_type),
+      session_label_suffix(rec),
+      if (!is.null(dur)) {
+        gray(paste0(" (", dur, ")"), output_type = output_type)
+      },
+      "\n"
+    )
+    kids <- children[[node_id]]
+    if (!is.null(kids)) {
+      for (k in kids) {
+        line <- paste0(line, render_node(k, depth + 1L))
+      }
+    }
+    line
+  }
+  for (r in roots) {
+    out <- paste0(out, render_node(r, 0L))
+  }
+  out
+} # /rtemis::repr.SupervisedSession
+
+
+# %% print.SupervisedSession ----
+method(print, SupervisedSession) <- function(x, output_type = NULL, ...) {
+  cat(repr(x, output_type = output_type))
+  invisible(x)
+} # /rtemis::print.SupervisedSession
+
+
+# %% session_status_glyph ----
+#' Status glyph for a session node
+#'
+#' @param status Character: Node status.
+#' @param output_type Character: Output type.
+#'
+#' @return Character: Styled glyph.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+session_status_glyph <- function(status, output_type = NULL) {
+  switch(
+    status,
+    ok = fmt("\u2714", col = col_success, output_type = output_type),
+    error = fmt("\u2718", col = col_error, output_type = output_type),
+    aborted = fmt("\u26A0", col = col_warn, output_type = output_type),
+    running = fmt("\u2026", col = col_info, output_type = output_type),
+    fmt("\u2022", output_type = output_type)
+  )
+} # /rtemis::session_status_glyph
+
+
+# %% session_format_duration ----
+#' Format a node duration
+#'
+#' @param t_start POSIXct: Start time.
+#' @param t_end POSIXct or NA: End time.
+#'
+#' @return Character or NULL.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+session_format_duration <- function(t_start, t_end) {
+  if (is.null(t_end) || length(t_end) == 0L || is.na(t_end)) {
+    return(NULL)
+  }
+  secs <- as.numeric(difftime(t_end, t_start, units = "secs"))
+  if (secs < 1) {
+    ms <- secs * 1000
+    # A value that rounds to "0 ms" under %.0f was actually below 0.5 ms; say so.
+    if (ms < 1) "<0.5 ms" else sprintf("%.0f ms", ms)
+  } else if (secs < 60) {
+    sprintf("%.1f s", secs)
+  } else {
+    sprintf("%.1f min", secs / 60)
+  }
+} # /rtemis::session_format_duration
+
+
+# %% session_label_suffix ----
+#' Non-redundant label suffix for a node
+#'
+#' Returns `" <label>"` when the record carries a distinguishing detail, or `""` when it
+#' has none or merely repeats `kind`. The `kind` token already names the node, so labels
+#' must add only what `kind` does not say.
+#'
+#' @param rec List: Node record.
+#'
+#' @return Character.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+session_label_suffix <- function(rec) {
+  lbl <- rec[["label"]]
+  if (!is.null(lbl) && nzchar(lbl) && !identical(lbl, rec[["kind"]])) {
+    paste0(" ", lbl)
+  } else {
+    ""
+  }
+} # /rtemis::session_label_suffix
+
+
+# %% --- Ambient session lifecycle ----
+# The active session lives at a single fixed key `live[["session"]]` (a mutable
+# environment), so node_enter()/node_exit() and nested train() calls find "the current
+# session" with no arguments. See specs/observability.md section 3.
+
+# %% session_start ----
+#' Start an observability session
+#'
+#' Creates the ambient session in `live[["session"]]`. A nested `train()` call detects
+#' an active session and does **not** create a new one, so its nodes nest under the
+#' current stack.
+#'
+#' @param verbosity Integer: Top-level verbosity; gates the console renderer only.
+#'
+#' @return Logical: `TRUE` if a session was created (top-level call), `FALSE` if one was
+#' already active (nested call).
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+session_start <- function(verbosity = 1L) {
+  if (!is.null(live[["session"]])) {
+    return(FALSE)
+  }
+  s <- new.env(parent = emptyenv())
+  s[["id"]] <- session_new_id()
+  s[["nodes"]] <- new.env(parent = emptyenv())
+  s[["order"]] <- character()
+  s[["stack"]] <- character()
+  s[["counter"]] <- 0L
+  s[["started"]] <- Sys.time()
+  s[["verbosity"]] <- verbosity
+  live[["session"]] <- s
+  TRUE
+} # /rtemis::session_start
+
+
+# %% session_active ----
+#' Is an observability session active?
+#'
+#' @return Logical.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+session_active <- function() {
+  !is.null(live[["session"]])
+} # /rtemis::session_active
+
+
+# %% session_new_id ----
+#' Generate a unique session id
+#'
+#' @details
+#' The draw is RNG-neutral. Observability must not perturb the stream the computation
+#' runs on, or results would depend on whether a session happened to be created -- which
+#' is exactly what differs between an outer fold running in process (reuses the ambient
+#' session) and one running in a daemon (builds its own).
+#'
+#' @return Character.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+session_new_id <- function() {
+  with_preserved_rng(
+    paste0(
+      format(Sys.time(), "%Y%m%d%H%M%S"),
+      "-",
+      paste0(sample(c(0:9, letters[1:6]), 6L, replace = TRUE), collapse = "")
+    )
+  )
+} # /rtemis::session_new_id
+
+
+# %% node_enter ----
+#' Enter an execution graph node
+#'
+#' Records a new `"running"` node under the current stack top, pushes it onto the stack,
+#' and fires the enriched message sink (live stream). No-op when no session is active
+#' (safe in functions callable standalone, and on daemons whose `live` env has no
+#' session).
+#'
+#' @param kind Character: Node kind (e.g. `"tune"`, `"preprocess"`, `"train_alg"`).
+#' @param label Optional Character: Human-readable label.
+#' @param meta List: Kind-specific payload.
+#' @param total Optional Integer: Expected number of child steps (for progress).
+#'
+#' @return Character `node_id`, or `NULL` if no session is active.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+node_enter <- function(kind, label = NULL, meta = list(), total = NULL) {
+  s <- live[["session"]]
+  if (is.null(s)) {
+    return(NULL)
+  }
+  s[["counter"]] <- s[["counter"]] + 1L
+  node_id <- paste0("n", s[["counter"]])
+  parent_id <- if (length(s[["stack"]])) {
+    s[["stack"]][length(s[["stack"]])]
+  } else {
+    NA_character_
+  }
+  rec <- list(
+    node_id = node_id,
+    parent_id = parent_id,
+    kind = kind,
+    # `label` carries only the distinguishing detail (e.g. "10/10", "LightRF"); the `kind`
+    # already names the node, so labels must not repeat it. NULL when there is no detail.
+    label = label,
+    status = "running",
+    t_start = Sys.time(),
+    t_end = as.POSIXct(NA),
+    meta = meta
+  )
+  s[["nodes"]][[node_id]] <- rec
+  s[["order"]] <- c(s[["order"]], node_id)
+  s[["stack"]] <- c(s[["stack"]], node_id)
+  session_render(rec, phase = "start", verbosity = s[["verbosity"]])
+  session_emit_sink(rec, phase = "start", total = total)
+  node_id
+} # /rtemis::node_enter
+
+
+# %% node_exit ----
+#' Exit an execution graph node
+#'
+#' Finalizes a node's status, end time, and merged meta, pops the stack, and fires the
+#' enriched sink. No-op when `node_id` is `NULL` or no session is active.
+#'
+#' @param node_id Character or NULL: The id returned by `node_enter()`.
+#' @param status Character: One of `"ok"`, `"error"`, `"aborted"`.
+#' @param meta List: Additional payload to merge (e.g. metric).
+#' @param error Optional condition: Captured error; its message/class are stored on meta.
+#'
+#' @return Invisible NULL.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+node_exit <- function(node_id, status = "ok", meta = list(), error = NULL) {
+  if (is.null(node_id)) {
+    return(invisible(NULL))
+  }
+  s <- live[["session"]]
+  if (is.null(s)) {
+    return(invisible(NULL))
+  }
+  rec <- s[["nodes"]][[node_id]]
+  if (is.null(rec)) {
+    return(invisible(NULL))
+  }
+  rec[["t_end"]] <- Sys.time()
+  rec[["status"]] <- status
+  if (!is.null(error)) {
+    meta[["error_message"]] <- conditionMessage(error)
+    meta[["error_class"]] <- class(error)
+  }
+  if (length(meta)) {
+    rec[["meta"]] <- utils::modifyList(rec[["meta"]], meta)
+  }
+  s[["nodes"]][[node_id]] <- rec
+  # Render before popping: session_render derives indentation from the stack length, so
+  # the "done" line must see the same stack depth as the matching "start" line did.
+  session_render(rec, phase = "done", verbosity = s[["verbosity"]])
+  # Pop the stack down to (and excluding) this node; defensive against skipped exits.
+  pos <- match(node_id, s[["stack"]])
+  if (!is.na(pos)) {
+    s[["stack"]] <- s[["stack"]][seq_len(pos - 1L)]
+  }
+  session_emit_sink(rec, phase = if (status == "ok") "done" else status)
+  invisible(NULL)
+} # /rtemis::node_exit
+
+
+# %% session_finalize ----
+#' Finalize the active session into a `SupervisedSession` object
+#'
+#' Closes any still-open nodes as `"aborted"`, assembles the ordered event list, and
+#' returns a `SupervisedSession`. Does not clear the ambient slot; see `session_clear()`.
+#'
+#' @return `SupervisedSession` object, or `NULL` if no session is active.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+session_finalize <- function() {
+  s <- live[["session"]]
+  if (is.null(s)) {
+    return(NULL)
+  }
+  # Close any nodes still open (e.g. on an aborted run) as "aborted".
+  for (nid in rev(s[["stack"]])) {
+    rec <- s[["nodes"]][[nid]]
+    if (!is.null(rec) && identical(rec[["status"]], "running")) {
+      rec[["status"]] <- "aborted"
+      rec[["t_end"]] <- Sys.time()
+      s[["nodes"]][[nid]] <- rec
+    }
+  }
+  s[["stack"]] <- character()
+  events <- lapply(s[["order"]], function(nid) s[["nodes"]][[nid]])
+  SupervisedSession(
+    id = s[["id"]],
+    events = events,
+    started = s[["started"]],
+    finished = Sys.time()
+  )
+} # /rtemis::session_finalize
+
+
+# %% session_clear ----
+#' Clear the ambient session slot
+#'
+#' @return Invisible NULL.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+session_clear <- function() {
+  live[["session"]] <- NULL
+  invisible(NULL)
+} # /rtemis::session_clear
+
+
+# %% session_emit_sink ----
+#' Forward a node event to the message sink (live stream)
+#'
+#' Fires the rtemis.core message sink (if installed) with the enriched envelope so
+#' rtemis.server can emit nested `job.progress` events. No-op when no sink is installed
+#' (e.g. plain interactive use). The recorder and this sink fire regardless of verbosity;
+#' only the console renderer is verbosity-gated.
+#'
+#' `session_id` is what makes `node_id` meaningful to a remote consumer. Node ids are
+#' unique within a session, and one run puts several sessions on one wire: a grid cell
+#' detaches the ambient session and its inner `train()` opens its own, numbering from
+#' `n1` again, so the same id names an `outer_fold` in one event and a `train_alg` in the
+#' next. Without the session id the stream cannot be assembled into a tree at all.
+#'
+#' @param rec List: Node record.
+#' @param phase Character: `"start"`, `"done"`, `"error"`, or `"aborted"`.
+#' @param total Optional Integer: Expected child count.
+#'
+#' @return Invisible NULL.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+session_emit_sink <- function(rec, phase, total = NULL) {
+  sink <- rtemis.core::get_msg_sink()
+  if (is.null(sink)) {
+    return(invisible(NULL))
+  }
+  s <- live[["session"]]
+  sink(list(
+    text = paste0(rec[["kind"]], session_label_suffix(rec)),
+    caller = "train",
+    ts = format(Sys.time(), "%Y-%m-%d %H:%M:%S"),
+    level = if (phase == "error") "error" else "info",
+    session_id = if (!is.null(s)) s[["id"]] else NA_character_,
+    node_id = rec[["node_id"]],
+    parent_id = rec[["parent_id"]],
+    kind = rec[["kind"]],
+    label = rec[["label"]],
+    status = phase,
+    total = total
+  ))
+  invisible(NULL)
+} # /rtemis::session_emit_sink
+
+
+# %% session_current_node ----
+#' Id of the innermost open execution-graph node
+#'
+#' The node a caller is currently running inside. Passed to
+#' [rtemis.core::progress_begin()] as `parent_id` so a progress loop grafts onto the
+#' execution graph: the two streams share one wire, and a consumer assembles one
+#' tree from them.
+#'
+#' @return Character `node_id`, or `NULL` when no session is active or none is open.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+session_current_node <- function() {
+  s <- live[["session"]]
+  if (is.null(s) || !length(s[["stack"]])) {
+    return(NULL)
+  }
+  s[["stack"]][length(s[["stack"]])]
+} # /rtemis::session_current_node
+
+
+# %% session_render ----
+#' Render a node event to the console (nested progress)
+#'
+#' Verbosity-gated console rendering of the unified event stream: indented lines that
+#' reflect node depth. Replaces the previous `cli_progress_along`/`progressr` UIs for the
+#' instrumented steps.
+#'
+#' @param rec List: Node record.
+#' @param phase Character: `"start"` or `"done"`.
+#' @param verbosity Integer: Top-level verbosity.
+#'
+#' @return Invisible NULL.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+session_render <- function(rec, phase, verbosity = 1L) {
+  # Console rendering of the execution graph is diagnostic detail, off by default. The
+  # recorder (graph) and the sink (wire) fire regardless; only this console path is gated,
+  # at verbosity >= 2. See specs/observability.md section 6.
+  if (is.null(verbosity) || verbosity < 2L) {
+    return(invisible(NULL))
+  }
+  s <- live[["session"]]
+  depth <- if (!is.null(s)) max(length(s[["stack"]]) - 1L, 0L) else 0L
+  indent <- strrep("  ", depth)
+  if (phase == "start") {
+    msg0(
+      indent,
+      fmt("\u25b6 ", col = col_info),
+      fmt(rec[["kind"]], col = col_info),
+      session_label_suffix(rec),
+      verbosity = verbosity
+    )
+  } else {
+    dur <- session_format_duration(rec[["t_start"]], rec[["t_end"]])
+    msg0(
+      indent,
+      session_status_glyph(rec[["status"]]),
+      " ",
+      fmt(rec[["kind"]], col = col_info),
+      session_label_suffix(rec),
+      if (!is.null(dur)) gray(paste0(" (", dur, ")")),
+      verbosity = verbosity
+    )
+  }
+  invisible(NULL)
+} # /rtemis::session_render
+
+
+# %% node_meta ----
+#' Merge metadata onto a session node
+#'
+#' Updates the meta of the current stack-top node (or a given `node_id`). No-op when no
+#' session is active.
+#'
+#' @param meta List: Metadata to merge.
+#' @param node_id Optional Character: Target node; if NULL, the current stack top.
+#'
+#' @return Invisible NULL.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+node_meta <- function(meta, node_id = NULL) {
+  s <- live[["session"]]
+  if (is.null(s)) {
+    return(invisible(NULL))
+  }
+  if (is.null(node_id)) {
+    if (!length(s[["stack"]])) {
+      return(invisible(NULL))
+    }
+    node_id <- s[["stack"]][length(s[["stack"]])]
+  }
+  rec <- s[["nodes"]][[node_id]]
+  if (is.null(rec)) {
+    return(invisible(NULL))
+  }
+  rec[["meta"]] <- utils::modifyList(rec[["meta"]], meta)
+  s[["nodes"]][[node_id]] <- rec
+  invisible(NULL)
+} # /rtemis::node_meta
+
+
+# %% session_add_node ----
+#' Add a completed node to the session (host-synthesize)
+#'
+#' Records an already-finished node under the current stack top without pushing the stack.
+#' Used to reconstruct nodes for work that ran in daemons (e.g. grid cells), where the
+#' host knows the dispatched structure and fills status/meta from returned results. See
+#' specs/observability.md section 4. No-op when no session is active.
+#'
+#' @param kind Character: Node kind.
+#' @param label Optional Character: Label.
+#' @param status Character: Final status.
+#' @param meta List: Payload.
+#' @param t_start,t_end Optional POSIXct: Timestamps.
+#'
+#' @return Character `node_id`, or `NULL` if no session is active.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+session_add_node <- function(
+  kind,
+  label = NULL,
+  status = "ok",
+  meta = list(),
+  t_start = NULL,
+  t_end = NULL
+) {
+  s <- live[["session"]]
+  if (is.null(s)) {
+    return(NULL)
+  }
+  s[["counter"]] <- s[["counter"]] + 1L
+  node_id <- paste0("n", s[["counter"]])
+  parent_id <- if (length(s[["stack"]])) {
+    s[["stack"]][length(s[["stack"]])]
+  } else {
+    NA_character_
+  }
+  now <- Sys.time()
+  rec <- list(
+    node_id = node_id,
+    parent_id = parent_id,
+    kind = kind,
+    label = label,
+    status = status,
+    t_start = if (is.null(t_start)) now else t_start,
+    t_end = if (is.null(t_end)) now else t_end,
+    meta = meta
+  )
+  s[["nodes"]][[node_id]] <- rec
+  s[["order"]] <- c(s[["order"]], node_id)
+  session_emit_sink(rec, phase = if (status == "ok") "done" else status)
+  node_id
+} # /rtemis::session_add_node
+
+
+# %% session_graft ----
+#' Graft a worker's event log into the active session
+#'
+#' Merges the flat event log a worker produced -- an outer fold that ran in a daemon and
+#' therefore built its own session -- into the host session beneath `parent_id`. This is
+#' what keeps the execution graph of a parallel run identical to a sequential one; see
+#' `specs/observability.md` section 4.
+#'
+#' @details
+#' Node ids are per-session counters (`n1`, `n2`, ...), so ids from two workers collide by
+#' construction. Every grafted id is namespaced with `prefix` and each `parent_id` remapped
+#' in step.
+#'
+#' The worker's own root node is discarded and its children attached directly to
+#' `parent_id`. The host node already stands for that same `train()` call, so keeping both
+#' would give a parallel run one more level of nesting than a sequential one -- the
+#' opposite of the point. A log with no single root (which a session cannot produce) has
+#' every root attached instead, so nothing is silently dropped.
+#'
+#' Records are appended straight to the node table and never pushed onto `stack`: folds
+#' complete out of order, so a stack-based `node_enter()`/`node_exit()` bracket cannot span
+#' concurrent folds. `session_add_node()` is the same stack-free append.
+#'
+#' The sink is not fired for grafted records. They already streamed live from the worker's
+#' own sink as they happened; re-emitting here would report every event twice.
+#'
+#' @param events List: Flat event log, i.e. a `SupervisedSession`'s `@events`.
+#' @param parent_id Character: Host node the worker's nodes attach to.
+#' @param prefix Character: Namespace for the grafted node ids, e.g. `"f3"`.
+#'
+#' @return Invisible NULL.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+session_graft <- function(events, parent_id, prefix) {
+  s <- live[["session"]]
+  if (is.null(s) || is.null(parent_id) || length(events) == 0L) {
+    return(invisible(NULL))
+  }
+  is_root <- vapply(
+    events,
+    function(rec) {
+      p <- rec[["parent_id"]]
+      is.null(p) || is.na(p)
+    },
+    logical(1L)
+  )
+  drop_id <- if (sum(is_root) == 1L) {
+    events[[which(is_root)]][["node_id"]]
+  } else {
+    NA_character_
+  }
+  remap <- function(id) paste0(prefix, ".", id)
+  ids <- character()
+  for (i in seq_along(events)) {
+    rec <- events[[i]]
+    if (identical(rec[["node_id"]], drop_id)) {
+      next
+    }
+    parent <- rec[["parent_id"]]
+    rec[["node_id"]] <- remap(rec[["node_id"]])
+    rec[["parent_id"]] <- if (
+      is.null(parent) || is.na(parent) || identical(parent, drop_id)
+    ) {
+      parent_id
+    } else {
+      remap(parent)
+    }
+    s[["nodes"]][[rec[["node_id"]]]] <- rec
+    ids <- c(ids, rec[["node_id"]])
+  }
+  s[["order"]] <- c(s[["order"]], ids)
+  invisible(NULL)
+} # /rtemis::session_graft
+
+
+# %% session_timeline ----
+#' Session Execution Timeline Table
+#'
+#' Flatten the execution graph captured in a `SupervisedSession` (from
+#' [train()]) into a timeline (Gantt) table: one row per recorded node, ordered
+#' as a depth-first walk of the execution tree, with start/end offsets in
+#' milliseconds from session start.
+#'
+#' This is the single source of the tree-walk, labeling, and status logic for
+#' timeline renderers. `rtemis.server` consumes it for the `job.result`
+#' `session` slice, which the rtemislive web UI draws; pair it with
+#' `session_kind_colors()` to color bars by node kind.
+#'
+#' Nodes that never closed (status `"running"` or `"aborted"` with no end time)
+#' are drawn up to the session finish time when known, else to the latest
+#' recorded node start.
+#'
+#' @param session `SupervisedSession`: Session object, e.g. `model@session`.
+#'
+#' @return `data.table` with one row per node in depth-first order and columns:
+#' - `label` Character: Unique display label, indented two spaces per tree
+#'   depth (duplicates disambiguated with `" #<n>"` suffixes).
+#' - `start` Numeric: Node start, milliseconds from session start.
+#' - `end` Numeric: Node end, milliseconds from session start.
+#' - `kind` Character: Node kind (e.g. `"tune"`, `"grid_cell"`, `"train_alg"`).
+#' - `status` Character \{"ok", "error", "aborted", "running"\}: Node status.
+#' - `failed` Logical: `TRUE` when `status` is `"error"` or `"aborted"`.
+#' - `tip` Character: Preformatted tooltip text (`"name -- duration [status]"`).
+#'
+#' @author EDG
+#' @export
+#' @examples
+#' mod <- train(iris, hyperparameters = setup_CART())
+#' # One row per recorded node, depth-first: the run, then the steps under it.
+#' session_timeline(mod@session)
+session_timeline <- function(session) {
+  if (!S7_inherits(session, SupervisedSession)) {
+    rtemis.core::abort(
+      "`session` must be a SupervisedSession, e.g. `model@session`.",
+      class = c("rtemis_type_error", "rtemis_input_error")
+    )
+  }
+  events <- session@events
+  if (length(events) == 0L) {
+    rtemis.core::abort(
+      "This SupervisedSession has no recorded events.",
+      class = c("rtemis_value_error", "rtemis_input_error")
+    )
+  }
+  started <- session@started
+
+  # Elapsed milliseconds from session start.
+  to_ms <- function(t) {
+    if (is.null(t) || length(t) == 0L || is.na(t)) {
+      return(NA_real_)
+    }
+    as.numeric(difftime(t, started, units = "secs")) * 1000
+  }
+
+  # End fallback for nodes that never closed (running / aborted, NA t_end):
+  # the session finish time, else the latest known start.
+  finished <- session@finished
+  starts_ms <- vapply(events, function(e) to_ms(e[["t_start"]]), numeric(1L))
+  end_fallback <- if (
+    !is.null(finished) && length(finished) > 0L && !is.na(finished)
+  ) {
+    to_ms(finished)
+  } else if (all(is.na(starts_ms))) {
+    # Degenerate session (no finish time, no recorded starts): fall back to 0 so
+    # we never propagate -Inf (and its warning) into the bar geometry.
+    0
+  } else {
+    max(starts_ms, na.rm = TRUE)
+  }
+
+  # -- Rebuild the execution tree and order nodes depth-first ------------------
+  # Mirrors the console repr: index by node_id, collect children per parent
+  # (preserving insertion order), then DFS from the roots.
+  ids <- vapply(events, function(e) e[["node_id"]], character(1L))
+  by_id <- stats::setNames(events, ids)
+  parent_of <- vapply(
+    events,
+    function(e) {
+      p <- e[["parent_id"]]
+      if (is.null(p) || length(p) == 0L) NA_character_ else as.character(p)
+    },
+    character(1L)
+  )
+  children <- list()
+  roots <- character(0L)
+  for (i in seq_along(events)) {
+    p <- parent_of[[i]]
+    if (is.na(p) || is.null(by_id[[p]])) {
+      roots <- c(roots, ids[[i]])
+    } else {
+      children[[p]] <- c(children[[p]], ids[[i]])
+    }
+  }
+  ordered_ids <- character(0L)
+  depths <- integer(0L)
+  walk <- function(id, depth) {
+    ordered_ids[[length(ordered_ids) + 1L]] <<- id
+    depths[[length(depths) + 1L]] <<- depth
+    for (k in children[[id]]) {
+      walk(k, depth + 1L)
+    }
+  }
+  for (r in roots) {
+    walk(r, 0L)
+  }
+
+  fmt_dur <- function(ms) {
+    if (is.na(ms)) {
+      return("running")
+    }
+    if (ms < 0.5) {
+      return("<0.5 ms")
+    }
+    if (ms < 1000) {
+      return(sprintf("%.0f ms", ms))
+    }
+    sprintf("%.1f s", ms / 1000)
+  }
+
+  # -- Build the timeline frame in DFS order -----------------------------------
+  n <- length(ordered_ids)
+  label <- character(n)
+  start <- numeric(n)
+  end <- numeric(n)
+  status <- character(n)
+  kinds <- character(n)
+  tip <- character(n)
+  for (i in seq_len(n)) {
+    e <- by_id[[ordered_ids[[i]]]]
+    kind <- e[["kind"]]
+    kinds[[i]] <- kind
+    lbl <- e[["label"]]
+    # Non-redundant name: append the label only when it adds to `kind`.
+    nm <- if (!is.null(lbl) && nzchar(lbl) && !identical(lbl, kind)) {
+      paste(kind, lbl)
+    } else {
+      kind
+    }
+    # Indent by depth to convey hierarchy on the category axis.
+    label[[i]] <- paste0(strrep("  ", depths[[i]]), nm)
+    st <- to_ms(e[["t_start"]])
+    en <- to_ms(e[["t_end"]])
+    if (is.na(st)) {
+      st <- 0
+    }
+    if (is.na(en)) {
+      en <- end_fallback
+    }
+    if (en < st) {
+      en <- st
+    }
+    start[[i]] <- st
+    end[[i]] <- en
+    status[[i]] <- e[["status"]] %||% "ok"
+    tip[[i]] <- paste0(
+      trimws(nm),
+      "\u2014",
+      fmt_dur(en - st),
+      " [",
+      status[[i]],
+      "]"
+    )
+  }
+
+  # Duplicate display labels would collapse onto one category row; keep one row
+  # per node so the timeline matches the execution graph one-to-one.
+  label <- make.unique(label, sep = " #")
+
+  data.table(
+    label = label,
+    start = start,
+    end = end,
+    kind = kinds,
+    status = status,
+    # Failed/aborted nodes get flagged so renderers can outline them while the
+    # fill still encodes the kind.
+    failed = status %in% c("error", "aborted"),
+    tip = tip
+  )
+} # /rtemis::session_timeline
+
+
+# %% session_nodes ----
+#' Execution graph as a table
+#'
+#' @description
+#' The session's event log as one row per node, for writing to a columnar file.
+#'
+#' @details
+#' The durable projection, as distinct from [session_timeline()]'s display one:
+#' absolute timestamps rather than milliseconds from the session start, and no
+#' tooltip text. A reader reconstructs the tree from `parent_id` and computes
+#' whatever offsets it wants to draw.
+#'
+#' `meta` is kind-specific -- `resample_id` on a grid cell, `error_message` and
+#' `error_class` on a failure -- so it travels as one JSON string column. The
+#' table's shape is then independent of which node kinds a run produced and of
+#' the keys each payload carries; the column is lossless, and both DuckDB and
+#' polars extract from it.
+#'
+#' @param session `SupervisedSession`: The session to flatten.
+#'
+#' @return `data.frame` with one row per node: `node_id`, `parent_id`, `kind`,
+#' `label`, `status`, `t_start`, `t_end`, `meta`.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+session_nodes <- function(session) {
+  check_is_S7(session, SupervisedSession)
+  events <- session@events
+  if (length(events) == 0L) {
+    return(data.frame(
+      node_id = character(0L),
+      parent_id = character(0L),
+      kind = character(0L),
+      label = character(0L),
+      status = character(0L),
+      t_start = as.POSIXct(character(0L)),
+      t_end = as.POSIXct(character(0L)),
+      meta = character(0L),
+      stringsAsFactors = FALSE
+    ))
+  }
+  chr <- function(field) {
+    vapply(
+      events,
+      function(e) {
+        value <- e[[field]]
+        if (is.null(value)) NA_character_ else as.character(value)
+      },
+      character(1L)
+    )
+  }
+  time <- function(field) {
+    out <- lapply(events, function(e) {
+      value <- e[[field]]
+      if (is.null(value)) as.POSIXct(NA) else value
+    })
+    do.call(c, out)
+  }
+  data.frame(
+    node_id = chr("node_id"),
+    parent_id = chr("parent_id"),
+    kind = chr("kind"),
+    label = chr("label"),
+    status = chr("status"),
+    t_start = time("t_start"),
+    t_end = time("t_end"),
+    meta = vapply(
+      events,
+      function(e) {
+        meta <- e[["meta"]]
+        if (is.null(meta) || length(meta) == 0L) {
+          NA_character_
+        } else {
+          as.character(jsonlite::toJSON(
+            meta,
+            auto_unbox = TRUE,
+            na = "null",
+            null = "null",
+            digits = NA
+          ))
+        }
+      },
+      character(1L)
+    ),
+    stringsAsFactors = FALSE
+  )
+} # /rtemis::session_nodes
+
+
+# %% session_kind_colors ----
+#' Session Node Kind Colors
+#'
+#' Fixed color map for session node kinds, so timeline bars are colored the
+#' same wherever they are drawn. The fill is identical for like kinds, making
+#' same-color overlap read as a parallel process (only grid cells run
+#' concurrently; containers and sequential steps never share a fill *and* a
+#' time span). Kinds outside the fixed map fall back to `rtemis_colors`,
+#' recycled as needed.
+#'
+#' Exported so `rtemis.server` can attach the map to its `job.result` `session`
+#' slice and announce it on the `ready` frame, which is what lets the rtemislive
+#' web UI color its timeline bars and its live progress panel without a
+#' hard-coded palette of its own - one definition, here, for every renderer.
+#' Exported for rtemis interfaces and marked `@keywords internal`.
+#'
+#' @param kinds Character vector or NULL: Node kinds to color, in display order,
+#'   e.g. `unique(session_timeline(session)[["kind"]])`. `NULL` returns the
+#'   whole fixed map, which is what a remote renderer wants when it does not yet
+#'   know which kinds a run will report.
+#'
+#' @return Named character vector of hex colors, one per element of `kinds`.
+#'
+#' @author EDG
+#' @keywords internal
+#' @export
+session_kind_colors <- function(kinds = NULL) {
+  rtemis.core::check_character(kinds, allow_null = TRUE)
+  fixed <- c(
+    train = "#808080",
+    # Setup work, muted for the same reason: a bar the reader can find and
+    # measure, visually subordinate to the modeling work.
+    worker_pool = rtemis_colors[["juniper"]],
+    outer_fold = col_outer,
+    # The progress stream reports the loop over the folds, the graph reports each
+    # fold: one activity, so one color.
+    outer_resampling = col_outer,
+    tune = col_tuner,
+    # Grid cells are tuning work: same hue as `tune`, tinted halfway to white.
+    grid_cell = grDevices::colorRampPalette(c(col_tuner, "#FFFFFF"))(3L)[[2L]],
+    preprocess = col_preprocessor,
+    decompose = col_decom,
+    train_alg = highlight_col,
+    predict = rtemis_colors[["blue"]],
+    varimp = rtemis_colors[["light_blue"]],
+    metrics = rtemis_colors[["orange"]]
+  )
+  if (is.null(kinds)) {
+    return(fixed)
+  }
+  cols <- fixed[kinds]
+  names(cols) <- kinds
+  # rep_len recycles the palette so more unmapped kinds than palette colors
+  # each get a (repeated) color.
+  cols[is.na(cols)] <- rep_len(unname(rtemis_colors), sum(is.na(cols)))
+  cols
+} # /rtemis::session_kind_colors
+
+
+# %% session_report ----
+#' End-of-run model-count and failure report
+#'
+#' Derives all counts from the session graph and
+#' prints a structured summary: how many models were trained, broken out, with
+#' succeeded/failed and elapsed time. See specs/observability.md section 8.
+#'
+#' @param session `SupervisedSession` object or NULL.
+#' @param verbosity Integer: Verbosity.
+#'
+#' @return Invisible NULL.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+session_report <- function(session, verbosity = 1L) {
+  # Diagnostic detail, off by default; shown only at verbosity >= 2.
+  if (is.null(session) || verbosity < 2L) {
+    return(invisible(NULL))
+  }
+  events <- session@events
+  if (!length(events)) {
+    return(invisible(NULL))
+  }
+  kinds <- vapply(events, function(e) e[["kind"]], character(1L))
+  statuses <- vapply(events, function(e) e[["status"]], character(1L))
+  count_all <- function(k) sum(kinds == k)
+  count_fail <- function(k) {
+    sum(kinds == k & statuses %in% c("error", "aborted"))
+  }
+  n_grid <- count_all("grid_cell")
+  n_grid_fail <- count_fail("grid_cell")
+  n_final <- count_all("train_alg")
+  n_final_fail <- count_fail("train_alg")
+  n_outer <- count_all("outer_fold")
+  total <- n_grid + n_final
+  total_fail <- n_grid_fail + n_final_fail
+  dur <- session_format_duration(session@started, session@finished)
+  # Recover combos x inner from a tune node, if present.
+  tune_idx <- which(kinds == "tune")
+  n_combos <- n_inner <- NULL
+  if (length(tune_idx)) {
+    tmeta <- events[[tune_idx[1L]]][["meta"]]
+    n_combos <- tmeta[["n_combos"]]
+    n_inner <- tmeta[["n_inner"]]
+  }
+  msg0("Models trained:", verbosity = verbosity)
+  if (!is.null(n_combos) && !is.null(n_inner)) {
+    per_fold <- n_combos * n_inner + 1L
+    msg0(
+      "  tuning:  ",
+      n_combos,
+      " combos \u2a09 ",
+      n_inner,
+      " inner resamples = ",
+      n_combos * n_inner,
+      verbosity = verbosity
+    )
+    msg0("  + final: 1 per fit = 1", verbosity = verbosity)
+    if (n_outer > 1L) {
+      msg0(
+        "  \u00D7 ",
+        n_outer,
+        " outer folds = ",
+        total,
+        " models",
+        verbosity = verbosity
+      )
+    } else {
+      msg0("  total = ", per_fold, " models", verbosity = verbosity)
+    }
+  } else {
+    msg0(
+      "  ",
+      total,
+      " models",
+      if (n_grid > 0L) paste0(" (", n_grid, " tuning, ", n_final, " final)"),
+      verbosity = verbosity
+    )
+  }
+  msg0(
+    "  ",
+    total - total_fail,
+    " succeeded",
+    if (total_fail > 0L) paste0(", ", total_fail, " failed"),
+    if (!is.null(dur)) paste0(" in ", dur),
+    verbosity = verbosity
+  )
+  invisible(NULL)
+} # /rtemis::session_report

@@ -17,7 +17,8 @@ check_data(
 
 \item{name}{Character: Name of dataset.}
 
-\item{get_duplicates}{Logical: If TRUE, check for duplicate cases.}
+\item{get_duplicates}{Logical: If TRUE, count duplicate cases. If FALSE,
+\code{n_duplicates} is \code{NULL} and nothing reports on duplicates.}
 
 \item{get_na_case_pct}{Logical: If TRUE, calculate percent of NA values per
 case.}
@@ -34,14 +35,14 @@ Check Data
 \examples{
 n <- 1000
 x <- rnormmat(n, 50, return_df = TRUE)
-x$char1 <- sample(letters, n, TRUE)
-x$char2 <- sample(letters, n, TRUE)
-x$fct <- factor(sample(letters, n, TRUE))
+x[["char1"]] <- sample(letters, n, TRUE)
+x[["char2"]] <- sample(letters, n, TRUE)
+x[["fct"]] <- factor(sample(letters, n, TRUE))
 x <- rbind(x, x[1, ])
-x$const <- 99L
+x[["const"]] <- 99L
 x[sample(nrow(x), 20), 3] <- NA
 x[sample(nrow(x), 20), 10] <- NA
-x$fct[30:35] <- NA
+x[["fct"]][30:35] <- NA
 check_data(x)
 }
 \author{

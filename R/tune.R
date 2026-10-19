@@ -23,12 +23,15 @@ get_tuner_fn <- function(type = "GridSearch") {
 #' @param x tabular data: Training set data.
 #' @param hyperparameters `Hyperparameters` object: make using each learner's `setup_*` function.
 #' @param tuner_config `TunerConfig` object: created with [setup_GridSearch].
-#' @param preprocessor_config Optional `PreprocessorConfig` object: created with
-#' [setup_Preprocessor].
+#' @param preprocessor_config Optional `SupervisedPreprocessorConfig` object: created with
+#' [setup_SupervisedPreprocessor].
 #' @param decomposition_config Optional `DecompositionConfig` object: created with a
 #' decomposition `setup_*` function.
 #' @param weights Numeric vector: Optional case weights.
 #' @param verbosity Integer: Verbosity level.
+#' @param seed Optional Integer: Master seed for the grid's RNG substreams.
+#' @param shared_memory Character \{"none", "auto", "always"\}: Shared-memory policy for
+#' the data sent to workers.
 #'
 #' @author EDG
 #' @keywords internal
@@ -44,9 +47,11 @@ tune <- function(
   backend = "none",
   future_plan = "multicore",
   n_workers = 1L,
+  seed = NULL,
+  shared_memory = "none",
   on_error = "continue"
 ) {
-  check_is_S7(hyperparameters, Hyperparameters)
+  check_hyperparameters(hyperparameters)
   check_is_S7(tuner_config, TunerConfig)
   stopifnot(needs_tuning(hyperparameters))
 
@@ -62,6 +67,8 @@ tune <- function(
       backend = backend,
       future_plan = future_plan,
       n_workers = n_workers,
+      seed = seed,
+      shared_memory = shared_memory,
       on_error = on_error
     )
   } else {

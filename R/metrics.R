@@ -179,17 +179,33 @@ auc <- function(
   if (length(unique(true_int)) == 1) {
     return(NaN)
   }
-  if (method == "lightAUC") {
-    check_dependencies("lightAUC")
-    auc. <- lightAUC::lightAUC(probs = predicted_prob, actuals = true_int)
-  } else if (method == "ROCR") {
-    check_dependencies("ROCR")
+  # Resolve backend ----
+  # AUC is one optional metric computed via an optional (Suggests) backend.
+  # If the requested backend cannot be loaded (e.g. lightAUC's compiled stack
+  # fails to load after an upstream RcppParallel ABI bump), fall back rather
+  # than abort: an unavailable metric backend must not crash model training.
+  if (method == "lightAUC" && !auc_backend_available("lightAUC")) {
+    if (verbosity > 0L) {
+      msg("lightAUC unavailable; falling back to ROCR for AUC.")
+    }
+    method <- "ROCR"
+  }
+  if (method == "ROCR" && !auc_backend_available("ROCR")) {
+    if (verbosity > 0L) {
+      msg("No AUC backend available (lightAUC, ROCR); returning NA for AUC.")
+    }
+    return(NaN)
+  }
+
+  auc. <- if (method == "lightAUC") {
+    try(lightAUC::lightAUC(probs = predicted_prob, actuals = true_int))
+  } else {
     .pred <- try(ROCR::prediction(
       predicted_prob,
       true_int,
       label.ordering = NULL
     ))
-    auc. <- try(ROCR::performance(.pred, "auc")@y.values[[1]])
+    try(ROCR::performance(.pred, "auc")@y.values[[1]])
   }
 
   if (inherits(auc., "try-error")) {
@@ -201,6 +217,24 @@ auc <- function(
   }
   auc.
 } # /rtemis::auc
+
+
+# %% auc_backend_available ----
+#' Check whether an AUC backend package can be loaded
+#'
+#' Thin wrapper around `requireNamespace()`. Kept as a standalone internal so
+#' `auc()`'s fallback path can be exercised in tests via mocked bindings.
+#'
+#' @param pkg Character: Package name.
+#'
+#' @return Logical: `TRUE` if the namespace can be loaded.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+auc_backend_available <- function(pkg) {
+  requireNamespace(pkg, quietly = TRUE)
+} # /rtemis::auc_backend_available
 
 
 #' Area under the Curve by pairwise concordance
@@ -297,19 +331,24 @@ labels2int <- function(x, binclasspos = 2L) {
 #'
 #' @param true_labels Factor: True labels.
 #' @param predicted_labels Factor: predicted values.
-#' @param predicted_prob Numeric vector: predicted probabilities.
+#' @param predicted_prob Optional Numeric vector or matrix \[0, 1\]: Predicted
+#'   probabilities, one column per class. A single column is the positive
+#'   class's probability and enables the probability-based metrics (AUC, Brier
+#'   score); a multiclass matrix has no single score per case, so those are not
+#'   computed.
 #' @param binclasspos Integer: Factor level position of the positive class in binary classification.
 #' @param calc_auc Logical: If TRUE, calculate AUC. May be slow in very large datasets.
 #' @param calc_brier Logical: If TRUE, calculate Brier score.
 #' @param auc_method Character: "lightAUC", "pROC", "ROCR".
-#' @param sample Character: Sample name.
+#' @param sample Optional Character \{"Training", "Validation", "Test",
+#'   "Calibrated Training", "Calibrated Validation", "Calibrated Test"\}: Sample
+#'   the metrics describe.
 #' @param verbosity Integer: Verbosity level.
 #'
 #' @return `ClassificationMetrics` object.
 #'
 #' @author EDG
 #' @export
-#'
 #' @examples
 #' # Assume positive class is "b"
 #' true_labels <- factor(c("a", "a", "a", "b", "b", "b", "b", "b", "b", "b"))
@@ -326,14 +365,13 @@ classification_metrics <- function(
   calc_auc = TRUE,
   calc_brier = TRUE,
   auc_method = "lightAUC",
-  sample = character(),
+  sample = NULL,
   verbosity = 0L
 ) {
   # Checks ----
-  # Binary class probabilities only for now
-  if (length(predicted_prob) > length(true_labels)) {
-    predicted_prob <- NULL
-  }
+  # The probability-based metrics take one score per case, so a multiclass
+  # matrix has nothing to give them and drops out here.
+  predicted_prob <- positive_prob(predicted_prob)
   n_classes <- nlevels(true_labels)
 
   # Check same levels in
@@ -359,8 +397,10 @@ classification_metrics <- function(
   }
   true_levels <- levels(true_labels)
 
-  # Levels already set so that the first level is the positive class
-  positive_class <- if (n_classes == 2) true_levels[1] else NA
+  # Levels already set so that the first level is the positive class. NULL, not
+  # NA, when there is no such thing: NULL is the only "unset" value, and a bare
+  # NA would make the field logical for multiclass and character for binary.
+  positive_class <- if (n_classes == 2L) true_levels[1L] else NULL
   if (verbosity > 0L) {
     if (n_classes == 2) {
       msg(
@@ -377,9 +417,9 @@ classification_metrics <- function(
       )
     }
   }
+  # Dimension names are not set here: `ClassificationMetrics` stores the long
+  # form and derives the wide table, which labels both dimensions uniformly.
   tbl <- table(true_labels, predicted_labels)
-  # attr(tbl, "dimnames") <- list(Reference = true_levels, Predicted = true_levels)
-  names(attributes(tbl)[["dimnames"]]) <- c("Reference", "Predicted")
 
   class <- list()
   overall <- list()
@@ -439,15 +479,20 @@ classification_metrics <- function(
 
   # Outro ----
   overall <- as.data.frame(do.call(cbind, overall))
-  rownames(overall) <- "overall"
-  class <- (data.frame(
+  rownames(overall) <- NULL
+  # `level` carries the outcome level each row describes. It is a column rather
+  # than a row name because row names have no row-oriented JSON form: they would
+  # be dropped on serialization, leaving unlabeled per-class metrics.
+  class <- data.frame(
+    level = rownames(tbl),
     sensitivity = class[["sensitivity"]],
     specificity = class[["specificity"]],
     balanced_accuracy = class[["balanced_accuracy"]],
     ppv = class[["ppv"]],
     npv = class[["npv"]],
-    f1 = class[["f1"]]
-  ))
+    f1 = class[["f1"]],
+    row.names = NULL
+  )
 
   ClassificationMetrics(
     sample = sample,
@@ -465,13 +510,14 @@ classification_metrics <- function(
 #' @param true Numeric vector: True values.
 #' @param predicted Numeric vector: Predicted values.
 #' @param na.rm Logical: If TRUE, remove NA values before computation.
-#' @param sample Character: Sample name (e.g. "training", "test").
+#' @param sample Optional Character \{"Training", "Validation", "Test",
+#'   "Calibrated Training", "Calibrated Validation", "Calibrated Test"\}: Sample
+#'   the metrics describe.
 #'
 #' @return `RegressionMetrics` object.
 #'
 #' @author EDG
 #' @export
-#'
 #' @examples
 #' true <- rnorm(100)
 #' predicted <- true + rnorm(100, sd = 0.5)

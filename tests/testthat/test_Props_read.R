@@ -1,0 +1,340 @@
+# test_Props_read.R
+# ::rtemis::
+# 2026- EDG rtemis.org
+
+# Tests that sweep every published class check the schema contract, which
+# depends only on the package source. They run in CI and skip on CRAN.
+
+# The acceptance test for the whole props/schema layer: every class that
+# declares properties with the `prop_*` factories is emitted as a JSON Schema,
+# read back with `JSONSchema_to_S7()`, and compared spec by spec. A declaration
+# axis that the schema cannot carry shows up here as a mismatch.
+
+spec_of <- function(cls, nm) rtemis:::get_spec(cls@properties[[nm]])
+
+
+# Every S7 class in the namespace with at least one spec'd property, and no
+# property lacking a role (which is drift that `S7_to_JSONSchema()` rejects
+# outright). Discovered rather than listed, so a new class is covered without
+# editing this file.
+schema_classes <- function() {
+  catalog <- schema_catalog()
+  entries <- c(
+    unlist(
+      lapply(catalog[["families"]], function(family) family[["algorithms"]]),
+      recursive = FALSE
+    ),
+    catalog[["flat_configs"]],
+    catalog[["inline"]]
+  )
+  classes <- lapply(entries, `[[`, "cls")
+  stats::setNames(
+    classes,
+    vapply(classes, function(cls) cls@name, character(1L))
+  )
+}
+
+
+own_prop_names_for <- function(cls) {
+  base <- family_base(cls)
+  if (is.null(base)) names(cls@properties) else own_prop_names(cls, base)
+}
+
+
+base_of <- function(cls) family_base(cls)
+
+
+# Defaults reach a reader through the published artifact, i.e. through JSON.
+# Round-tripping them here exercises the coercion that restores what JSON drops
+# (integer vs double, most importantly).
+via_json <- function(x) {
+  if (is.null(x)) {
+    return(NULL)
+  }
+  jsonlite::fromJSON(
+    jsonlite::toJSON(x, auto_unbox = TRUE, null = "null", digits = NA),
+    simplifyVector = TRUE
+  )
+}
+
+
+# %% JSONSchema_to_S7() round-trips every declared class ----
+test_that("every published property preserves its schema constraints on read", {
+  skip_on_cran()
+  classes <- schema_classes()
+  expect_gt(length(classes), 20L)
+
+  for (cls_name in names(classes)) {
+    cls <- classes[[cls_name]]
+    own <- own_prop_names_for(cls)
+    schema <- S7_to_JSONSchema(
+      cls,
+      id = paste0(
+        "https://schema.rtemis.org/test/",
+        cls_name,
+        "/v1/schema.json"
+      ),
+      base = base_of(cls)
+    )
+    # The schema is what a consumer actually receives: JSON, not an R list.
+    schema <- jsonlite::fromJSON(
+      jsonlite::toJSON(schema, auto_unbox = TRUE, null = "null", digits = NA),
+      simplifyVector = FALSE
+    )
+    # A `computed` or `r_only` property carries a spec but is deliberately kept
+    # out of the schema, so there is no published form for it to round-trip
+    # through. `state` stays: a record declares it, marked `readOnly`.
+    published <- Filter(rtemis:::prop_published, cls@properties[own])
+    specs <- Filter(Negate(is.null), lapply(published, rtemis:::get_spec))
+    # Object construction defaults belong to the separate defaults artifact.
+    # This test compares declarations, including reference identity and arity.
+    defaults <- lapply(specs, function(s) {
+      if (is.null(s@target_class)) via_json(s@default) else NULL
+    })
+    defaults <- defaults[vapply(
+      specs,
+      function(s) s@default_present,
+      logical(1L)
+    )]
+    parent <- if (!is.null(schema[["x-rtemis"]][["publication"]][["parent"]])) {
+      cls@parent
+    } else {
+      NULL
+    }
+    rt <- JSONSchema_to_S7(
+      schema,
+      defaults = defaults,
+      name = cls_name,
+      parent = parent
+    )
+
+    expect_setequal(
+      as.character(names(rt@properties)),
+      as.character(c(
+        names(specs),
+        names(schema[["x-rtemis"]][["runtime_properties"]]),
+        # An explicitly supplied native parent retains implementation-only fields.
+        if (!is.null(parent)) {
+          names(Filter(
+            function(p) prop_role(p) %in% c("r_only", "computed"),
+            parent@properties
+          ))
+        }
+      ))
+    )
+    for (nm in names(specs)) {
+      original <- specs[[nm]]
+      restored <- spec_of(rt, nm)
+      label <- paste0(cls_name, "@", nm)
+      expect_equal(restored@type, original@type, label = label)
+      expect_equal(restored@target_class, original@target_class, label = label)
+      expect_equal(restored@max_items, original@max_items, label = label)
+      expect_equal(restored@minimum, original@minimum, label = label)
+      expect_equal(restored@maximum, original@maximum, label = label)
+      expect_equal(
+        restored@exclusive_minimum,
+        original@exclusive_minimum,
+        label = label
+      )
+      expect_equal(
+        restored@exclusive_maximum,
+        original@exclusive_maximum,
+        label = label
+      )
+      expect_equal(restored@enum, original@enum, label = label)
+      expect_equal(restored@nullable, original@nullable, label = label)
+      expect_equal(restored@tunable, original@tunable, label = label)
+      expect_equal(restored@container, original@container, label = label)
+      expect_equal(restored@broadcast, original@broadcast, label = label)
+      expect_equal(restored@min_items, original@min_items, label = label)
+      expect_equal(restored@unique_items, original@unique_items, label = label)
+      expect_equal(restored@constant, original@constant, label = label)
+      expect_equal(restored@tune_on_null, original@tune_on_null, label = label)
+      expect_equal(
+        restored@default_on_null,
+        original@default_on_null,
+        label = label
+      )
+      expect_equal(restored@data_bound, original@data_bound, label = label)
+      expect_equal(
+        restored@data_dependent,
+        original@data_dependent,
+        label = label
+      )
+      expect_equal(
+        restored@applies_when,
+        original@applies_when,
+        label = label
+      )
+      expect_equal(restored@description, original@description, label = label)
+      # `@items` is a nested spec; compare the axes that make it one.
+      if (is.null(original@items)) {
+        expect_null(restored@items, label = label)
+      } else {
+        expect_equal(restored@items@type, original@items@type, label = label)
+        expect_equal(
+          restored@items@container,
+          original@items@container,
+          label = label
+        )
+      }
+    }
+  }
+})
+
+
+# %% the restored class validates like the original ----
+test_that("a restored class enforces the same constraints", {
+  schema <- S7_to_JSONSchema(
+    rtemis:::CARTHyperparameters,
+    id = "https://schema.rtemis.org/test/cart/v1/schema.json",
+    base = rtemis:::Hyperparameters
+  )
+  specs <- Filter(
+    Negate(is.null),
+    lapply(
+      rtemis:::CARTHyperparameters@properties[own_prop_names_for(
+        rtemis:::CARTHyperparameters
+      )],
+      rtemis:::get_spec
+    )
+  )
+  cls <- JSONSchema_to_S7(
+    schema,
+    defaults = lapply(specs, function(s) s@default),
+    name = "CARTRestored"
+  )
+  # `maxdepth` is bounded [1, 30] in the declaration; the restored class must
+  # reject the same values, or the schema did not carry the constraint.
+  expect_error(cls(maxdepth = 0L))
+  expect_error(cls(maxdepth = 99L))
+  expect_no_error(cls(maxdepth = 10L))
+  # Type is enforced too: JSON's single number type is not an excuse.
+  expect_error(cls(maxdepth = "ten"))
+})
+
+
+# %% missing defaults remain required at construction ----
+test_that("JSONSchema_to_S7() can describe properties without inventing defaults", {
+  schema <- S7_to_JSONSchema(
+    rtemis:::CARTHyperparameters,
+    id = "https://schema.rtemis.org/test/cart/v1/schema.json",
+    base = rtemis:::Hyperparameters
+  )
+  restored <- JSONSchema_to_S7(schema)
+  expect_false(get_spec(restored@properties[["cp"]])@default_present)
+  expect_error(restored(), class = "rtemis_input_error")
+})
+
+
+# %% array arity survives the round trip ----
+# `DecompositionConfig` is the only class declaring `min_items`/`unique_items`,
+# and it is not reached by the discovery above (its own `algorithm` property
+# carries no role), so its axes are checked directly. They travel as standard
+# keywords, which for a broadcast property sit on the trailing `oneOf` branch
+# rather than at the top level.
+test_that("min_items and unique_items round-trip", {
+  original <- rtemis:::get_spec(
+    rtemis:::DecompositionConfig@properties[["features"]]
+  )
+  restored <- rtemis:::schema_to_spec(
+    rtemis:::spec_to_schema(original),
+    default = NULL
+  )
+  expect_identical(restored@min_items, 2L)
+  expect_true(restored@unique_items)
+  expect_identical(restored@container, "array")
+
+  broadcast <- rtemis:::get_spec(prop_float(
+    NULL,
+    min = 0,
+    nullable = TRUE,
+    vector = TRUE,
+    broadcast = TRUE,
+    unique_items = TRUE
+  ))
+  rt <- rtemis:::schema_to_spec(
+    rtemis:::spec_to_schema(broadcast),
+    default = NULL
+  )
+  expect_true(rt@broadcast)
+  expect_true(rt@unique_items)
+  expect_identical(rt@min_items, 1L)
+})
+
+
+# %% a hand-written schema without x-rtemis is rejected ----
+test_that("schema_to_spec() rejects a property with no x-rtemis", {
+  expect_error(
+    rtemis:::schema_to_spec(list(type = "integer", minimum = 1L)),
+    class = "rtemis_value_error"
+  )
+})
+
+
+# %% $ref properties need their class ----
+test_that("JSONSchema_to_S7() names unresolved `$ref` properties", {
+  schema <- list(
+    title = "WithRef",
+    properties = list(
+      nested = list(
+        oneOf = list(
+          list(type = "null"),
+          list(
+            `$ref` = "https://schema.rtemis.org/preprocessor/r/v1/schema.json"
+          )
+        )
+      )
+    )
+  )
+  expect_error(JSONSchema_to_S7(schema), class = "rtemis_value_error")
+
+  # A nested config resolves to a class the reader built from its own schema,
+  # which is how a port composes a whole config tree. A flat config: a
+  # dispatched family's document is assembled from a dispatcher and a leaf, and
+  # neither half is what `S7_to_JSONSchema()` emits from one class.
+  prep_schema <- S7_to_JSONSchema(
+    rtemis:::PreprocessorConfig,
+    id = "https://schema.rtemis.org/preprocessor/r/v1/schema.json"
+  )
+  prep_specs <- Filter(
+    Negate(is.null),
+    lapply(rtemis:::PreprocessorConfig@properties, rtemis:::get_spec)
+  )
+  prep <- JSONSchema_to_S7(
+    prep_schema,
+    defaults = lapply(prep_specs, function(s) s@default),
+    name = "PreprocessorRestored"
+  )
+  cls <- JSONSchema_to_S7(schema, refs = list(nested = prep))
+  expect_true(inherits(cls, "S7_class"))
+  expect_null(cls()@nested)
+  expect_true(inherits(cls(nested = prep())@nested, "PreprocessorRestored"))
+})
+
+
+# %% format_allowed ----
+test_that("A gate lists its allowed values without padding them", {
+  # `format()` pads a character vector to a common width and right-justifies
+  # numbers to one, and `trim` suppresses only the second.
+  expect_equal(format_allowed(c("ridge", "elasticnet")), "ridge or elasticnet")
+  expect_equal(format_allowed(c(-1L, 1L)), "-1 or 1")
+  expect_equal(format_allowed("stump"), "stump")
+  expect_equal(
+    format_allowed(c("a", "bb", "ccc")),
+    "a, bb or ccc"
+  )
+})
+
+test_that("a gate spells its values as JSON when the message is published", {
+  # `applies_when_note()` goes into a schema every implementation reads, so the
+  # value must be the one a reader would write. The R form above is the other
+  # audience: a validator message telling an R caller what to set.
+  expect_equal(format_allowed(TRUE, json = TRUE), "true")
+  expect_equal(format_allowed(c(TRUE, FALSE), json = TRUE), "true or false")
+  expect_equal(
+    format_allowed(c("rbf", "laplace"), json = TRUE),
+    '"rbf" or "laplace"'
+  )
+  expect_equal(format_allowed(c(-1L, 1L), json = TRUE), "-1 or 1")
+})

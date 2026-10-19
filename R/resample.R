@@ -14,63 +14,93 @@
 #' operations which rely on equal-length vectors. For example, you can't place resamples in a
 #' data.frame, but must use a list instead.
 #'
-#' @param x Vector or data.frame: Usually the outcome; `NROW(x)` defines the sample size.
-#' @param config Resampler object created by [setup_Resampler].
+#' @param x Vector or data.frame: Usually the outcome; `NROW(x)` defines the sample size. A
+#' config naming a column -- `stratify_var` or `id_strat` -- needs the data frame that column
+#' lives in, since a name cannot be looked up in a bare vector.
+#' @param config Resampler object created by one of the `setup_*` resampler
+#' functions, e.g. [setup_KFold].
 #' @param verbosity Integer: Verbosity level.
 #'
 #' @return `Resampler` object.
 #'
 #' @author EDG
 #' @export
-#'
 #' @examples
 #' y <- rnorm(200)
 #' # 10-fold (stratified)
-#' y_10fold <- resample(y, setup_Resampler(10L, "kfold"))
+#' y_10fold <- resample(y, setup_KFold(10L))
 #' y_10fold
 #' # 25 stratified subsamples
-#' y_25strat <- resample(y, setup_Resampler(25L, "stratsub"))
+#' y_25strat <- resample(y, setup_StratSub(25L))
 #' y_25strat
 #' # 100 stratified bootstraps
-#' y_100strat <- resample(y, setup_Resampler(100L, "stratboot"))
+#' y_100strat <- resample(y, setup_StratBoot(100L))
 #' y_100strat
 #' # LOOCV
-#' y_loocv <- resample(y, setup_Resampler(type = "LOOCV"))
+#' y_loocv <- resample(y, setup_LOOCV())
 #' y_loocv
+#' # User-supplied resamples
+#' y_custom <- resample(
+#'   y,
+#'   setup_Custom(resamples = list(1:150, 51:200))
+#' )
+#' y_custom
 resample <- function(
   x,
-  config = setup_Resampler(),
+  config = setup_KFold(),
   #  index = NULL,
   #  group = NULL,
   verbosity = 1L
 ) {
   check_is_S7(config, ResamplerConfig)
+  check_data_bounds(config, x)
   # Input ----
   type <- config@type
-  if (NCOL(x) > 1) {
-    if (survival::is.Surv(x)) {
+  # `stratify_var` and `id_strat` name columns, so they are resolved here, while
+  # `x` is still the frame they live in: everything below works on the outcome
+  # vector alone and could not look a name up.
+  strat_values <- resolve_resampler_column(config, x, "stratify_var")
+  id_strat <- if (type %in% c("LOOCV", "Custom")) {
+    # LOOCV puts one case in each resample and Custom takes the resamples as
+    # given, so neither has anything to group.
+    NULL
+  } else {
+    resolve_resampler_column(config, x, "id_strat")
+  }
+  # Narrowed whenever `x` is tabular, a single column included: a 1-column
+  # frame is still a frame, and left as one it would reach the resamplers as a
+  # list and fail there on coercion.
+  if (!is.null(dim(x))) {
+    # `inherits()`, which is the body of `survival::is.Surv()`: survival is a
+    # Suggests, and reaching into it here both hard-fails when it is absent and loads its
+    # namespace (~450 ms) on the first resample() of every session.
+    if (inherits(x, "Surv")) {
       msg("Survival object will be stratified on time.", verbosity = verbosity)
       x <- x[, 1]
     } else {
-      msg(
-        "Input contains more than one column; stratifying on last.",
-        verbosity = verbosity
-      )
-      x <- x[[NCOL(x)]]
+      if (NCOL(x) > 1L) {
+        # Stratifying on last column, i.e. outcome, is almost universal;
+        # no need to print every single time
+        msg(
+          "Input contains more than one column; stratifying on last.",
+          verbosity = verbosity - 1L
+        )
+      }
+      # `[[` indexes a matrix in column-major order rather than by column.
+      x <- if (is.data.frame(x)) x[[NCOL(x)]] else x[, NCOL(x)]
     }
   }
 
   # Stratify on case IDs ----
-  id_strat <- if (type != "LOOCV") {
-    config@id_strat
-  } else {
-    NULL
-  }
-
   if (!is.null(id_strat)) {
     # Only keep unique IDs
     idl <- !duplicated(id_strat)
     x <- x[idl]
+    # The stratification values describe the same cases, so they are narrowed
+    # with them so the two stay aligned.
+    if (!is.null(strat_values)) {
+      strat_values <- strat_values[idl]
+    }
   }
 
   if (type == "StratBoot") {
@@ -82,15 +112,13 @@ resample <- function(
   }
 
   # resample ----
-  if (!type %in% c("Bootstrap", "LOOCV")) {
-    .stratify_var <- if (is.null(config@stratify_var)) {
-      x
-    } else {
-      config@stratify_var
-    }
+  if (!type %in% c("Bootstrap", "LOOCV", "Custom")) {
+    # Unnamed, so stratify on the outcome itself -- almost always what is
+    # wanted, and the only column `resample()` is guaranteed to have.
+    .stratify_var <- if (is.null(strat_values)) x else strat_values
   }
 
-  n_resamples <- if (type == "LOOCV") length(x) else config@n
+  n_resamples <- if (type == "LOOCV") length(x) else config@n_resamples
 
   # Print config ----
   if (verbosity > 1L) {
@@ -130,7 +158,7 @@ resample <- function(
     ## LOOCV ----
     res_part <- loocv(x = x)
     # Get number of resamples
-    config@n <- length(res_part)
+    config@n_resamples <- length(res_part)
   } else if (type == "StratBoot") {
     ## StratBoot ----
     res_part <- strat_boot(
@@ -143,10 +171,18 @@ resample <- function(
       seed = config@seed,
       verbosity = verbosity
     )
+  } else if (type == "Custom") {
+    ## Custom ----
+    # Supplied by the user, so the only thing left to establish is that
+    # the indices address these cases. Checked here because only `resample()`
+    # sees the data; the class can check their shape but never their range.
+    res_part <- custom_resamples(config@resamples, NROW(x))
+    # Get number of resamples
+    config@n_resamples <- length(res_part)
   }
 
   # Update strat_n_bins ----
-  if (type == "StratSub" || type == "StratBoot") {
+  if (type %in% c("KFold", "StratSub", "StratBoot")) {
     actual_n_bins <- attr(res_part, "strat_n_bins")
     if (actual_n_bins != config@strat_n_bins) {
       if (verbosity > 0L) {
@@ -174,6 +210,134 @@ resample <- function(
 } # /rtemis::resample
 
 
+# %% resolve_resampler_column ----
+#' Read the column a resampler config names
+#'
+#' `stratify_var` and `id_strat` hold the *name* of a column: a name is one string that means the same thing to any implementation
+#' reading the config, while a per-case vector is only true of one dataset in
+#' one row order. Resolving a name needs the frame, so this runs before
+#' `resample()` narrows `x` to the outcome and loses it.
+#'
+#' @param config ResamplerConfig: Config to read the column name from.
+#' @param x Vector or data.frame: What `resample()` was given.
+#' @param name Character \{"stratify_var", "id_strat"\}: Property holding the
+#' column name.
+#'
+#' @return Vector holding the column's values, or NULL if the property is unset
+#' or this resampler type does not declare it.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+resolve_resampler_column <- function(config, x, name) {
+  if (!name %in% names(props(config))) {
+    return(NULL)
+  }
+  column <- prop(config, name)
+  if (is.null(column)) {
+    return(NULL)
+  }
+  # Tabular or not, whatever the column count: a 1-column frame carries a
+  # name to look up just as a wider one does.
+  if (is.null(dim(x))) {
+    rtemis.core::abort(
+      "@",
+      name,
+      " names the column '",
+      column,
+      "', but resample() was given a vector. Pass the data frame the ",
+      "column lives in.",
+      class = c("rtemis_value_error", "rtemis_input_error")
+    )
+  }
+  if (!column %in% colnames(x)) {
+    rtemis.core::abort(
+      "@",
+      name,
+      " names the column '",
+      column,
+      "', which is not present. Available columns: ",
+      paste(colnames(x), collapse = ", "),
+      ".",
+      class = c("rtemis_value_error", "rtemis_input_error")
+    )
+  }
+  if (is.data.frame(x)) x[[column]] else x[, column]
+} # /rtemis::resolve_resampler_column
+
+
+# %% drop_id_strat_column ----
+#' Remove the identifier column a resampler config names
+#'
+#' The column `id_strat` names says which cases belong together; it identifies
+#' cases, so it is not a feature. `resample()` needs the
+#' frame that carries it, so a caller resamples on the original and models on
+#' what this returns.
+#'
+#' A column that is named but absent is left to `resample()`, which reports it
+#' against the full frame.
+#'
+#' @param x data.frame, data.table, or tibble: Training data.
+#' @param config Optional ResamplerConfig: Config that may name the column.
+#'
+#' @return `x` without the identifier column, unchanged if none is named.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+drop_id_strat_column <- function(x, config) {
+  if (is.null(config) || !"id_strat" %in% names(props(config))) {
+    return(x)
+  }
+  column <- config@id_strat
+  if (is.null(column) || !column %in% colnames(x)) {
+    return(x)
+  }
+  exc(x, column)
+} # /rtemis::drop_id_strat_column
+
+
+# %% custom_resamples ----
+#' User-supplied resampling
+#'
+#' The counterpart of `kfold()` and `bootstrap()` for user-supplied resamples. The property spec has already checked their shape -- a
+#' non-empty list of non-empty integer vectors, each index at least 1 -- so all
+#' that is left is the upper bound, which only `resample()` can know: `n_cases`
+#' is a fact about the data, not about the config, and none of `data_bound`'s
+#' three meanings (scalar `<=` dim, vector length `==` dim, names within
+#' columns) states "every index within the case count".
+#'
+#' @param resamples List of integer vectors: Training-case indices per resample.
+#' @param n_cases Integer [1, Inf): Number of cases the indices address.
+#'
+#' @return List of integer vectors, named per resample.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+custom_resamples <- function(resamples, n_cases) {
+  # Shape is the property spec's job and has already run: a non-empty list of
+  # non-empty integer vectors, each at least 1, none missing. What is left is
+  # the upper bound, which is the only part that depends on the data.
+  for (i in seq_along(resamples)) {
+    if (any(resamples[[i]] > n_cases)) {
+      rtemis.core::abort(
+        "@resamples[[",
+        i,
+        "]] indexes outside the data: indices must lie in [1, ",
+        n_cases,
+        "].",
+        class = c("rtemis_range_error", "rtemis_input_error")
+      )
+    }
+  }
+  if (is.null(names(resamples))) {
+    names(resamples) <- paste0("Custom_", seq_along(resamples))
+  }
+  resamples
+} # /rtemis::custom_resamples
+
+
 #' Bootstrap Resampling
 #'
 #' @param x Input vector.
@@ -199,7 +363,7 @@ bootstrap <- function(x, n_resamples = 10, seed = NULL) {
     seq(n_resamples),
     function(i) sort(sample(ids, .length, replace = TRUE))
   )
-  names(res) <- paste0("Bootsrap_", seq(n_resamples))
+  names(res) <- paste0("Bootstrap_", seq(n_resamples))
   res
 } # /rtemis::bootstrap
 
@@ -229,25 +393,17 @@ kfold <- function(
   if (is.null(stratify_var)) {
     stratify_var <- x
   }
-  stratify_var <- as.numeric(stratify_var)
-  # ->> update
-  max.bins <- length(unique(stratify_var))
-  if (max.bins < strat_n_bins) {
-    if (max.bins == 1) {
-      rtemis.core::abort(
-        "Only one unique value present in stratify_var.",
-        class = c("rtemis_value_error", "rtemis_input_error")
-      )
-    }
-    if (verbosity > 0L) {
-      msg0("Using max n bins possible = ", max.bins, ".")
-    }
-    strat_n_bins <- max.bins
+  strata <- strat_groups(stratify_var, strat_n_bins, verbosity)
+  if (strata[["n_groups"]] == 1L) {
+    rtemis.core::abort(
+      "Only one unique value present in stratify_var.",
+      class = c("rtemis_value_error", "rtemis_input_error")
+    )
   }
+  strat_n_bins <- strata[["n_bins"]] %||% strat_n_bins
 
   ids <- seq_along(x)
-  # cuts
-  cuts <- cut(stratify_var, breaks = strat_n_bins, labels = FALSE)
+  cuts <- strata[["groups"]]
   cut.bins <- sort(unique(cuts))
 
   # ids by cut
@@ -276,6 +432,54 @@ kfold <- function(
 } # /rtemis::kfold
 
 
+# %% strat_groups ----
+#' Strata for stratified resampling
+#'
+#' A categorical variable stratifies by its observed levels. A numeric
+#' variable is cut into `strat_n_bins` equal-width intervals, or one per
+#' distinct value when it has fewer.
+#'
+#' @param stratify_var Vector: Variable to stratify by.
+#' @param strat_n_bins Integer: Intervals for a numeric variable.
+#' @param verbosity Integer: Verbosity level.
+#'
+#' @return List with `groups` (integer stratum per case), `n_groups`, and
+#'   `n_bins`: the intervals a numeric variable was cut into, or NULL for a
+#'   categorical variable.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+strat_groups <- function(stratify_var, strat_n_bins, verbosity = 1L) {
+  if (
+    is.factor(stratify_var) ||
+      is.character(stratify_var) ||
+      is.logical(stratify_var)
+  ) {
+    groups <- as.integer(factor(stratify_var))
+    return(list(
+      groups = groups,
+      n_groups = length(unique(groups)),
+      n_bins = NULL
+    ))
+  }
+  stratify_var <- as.numeric(stratify_var)
+  n_unique <- length(unique(stratify_var))
+  if (n_unique < strat_n_bins) {
+    if (verbosity > 0L) {
+      msg0("Using max n bins possible = ", n_unique, ".")
+    }
+    strat_n_bins <- n_unique
+  }
+  groups <- cut(stratify_var, breaks = strat_n_bins, labels = FALSE)
+  list(
+    groups = groups,
+    n_groups = length(unique(groups)),
+    n_bins = strat_n_bins
+  )
+} # /rtemis::strat_groups
+
+
 #' Resample using Stratified Subsamples
 #'
 #' @inheritParams resample
@@ -300,16 +504,10 @@ strat_sub <- function(
   if (is.null(stratify_var)) {
     stratify_var <- x
   }
-  stratify_var <- as.numeric(stratify_var)
-  max.bins <- length(unique(stratify_var))
-  if (max.bins < strat_n_bins) {
-    if (verbosity > 0L) {
-      msg("Using max n bins possible =", max.bins)
-    }
-    strat_n_bins <- max.bins
-  }
+  strata <- strat_groups(stratify_var, strat_n_bins, verbosity)
+  strat_n_bins <- strata[["n_bins"]] %||% strat_n_bins
   ids <- seq_along(x)
-  cuts <- cut(stratify_var, breaks = strat_n_bins, labels = FALSE)
+  cuts <- strata[["groups"]]
   cut.bins <- sort(unique(cuts))
   idl <- lapply(seq_along(cut.bins), function(i) ids[cuts == cut.bins[i]])
   idl.length <- as.numeric(table(cuts))

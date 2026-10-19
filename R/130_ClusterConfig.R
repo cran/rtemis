@@ -1,0 +1,207 @@
+# 130_ClusterConfig.R
+# ::rtemis::
+# 2026- EDG rtemis.org
+
+# References ----
+# https://github.com/RConsortium/S7
+# https://rconsortium.github.io/S7/
+
+# %% ClusterConfig ----
+#' ClusterConfig Class
+#'
+#' @description
+#' Clustering Pipeline Configuration Class. A portable, data-agnostic recipe for
+#' a clustering pipeline: it bundles the input data path, the algorithm-specific
+#' `ClusteringConfig`, and the output directory, so the same config can be
+#' validated, shared, written to disk, or described without data and have a path
+#' bound later (e.g. by the `rtemis` CLI) before [cluster].
+#'
+#' @author EDG
+#' @noRd
+ClusterConfig <- schema_class(
+  name = "ClusterConfig",
+  package = "rtemis",
+  defaults = list(
+    execution_config = DefaultPolicy(
+      kind = "literal",
+      value = list(backend = "future")
+    )
+  ),
+  properties = list(
+    dat_path = prop_string(
+      NULL,
+      nullable = TRUE,
+      description = "Path to the input data."
+    ),
+    # Nested config object (a `$ref` in the generated schema). The algorithm is
+    # named here and nowhere else in the document: a second copy beside it
+    # would be a fact stated twice, with no rule for which copy wins.
+    clustering_config = prop_object(
+      ClusteringConfig,
+      nullable = TRUE,
+      description = "Clustering algorithm and its settings, including the feature columns to cluster on. Absent = the default algorithm with its default settings on all numeric columns."
+    ),
+    execution_config = prop_object(
+      ExecutionConfig,
+      description = "Execution backend, worker and thread counts, failure policy and seed. A clustering dispatches no work to other processes, so its workers are threads for an algorithm that uses them."
+    ),
+    outdir = prop_string(
+      "results/",
+      description = "Output directory for results."
+    ),
+    verbosity = prop_integer(
+      1L,
+      min = 0L,
+      description = "Verbosity level."
+    )
+  ),
+  publication = SchemaPublication(
+    role = "document",
+    slug = "cluster",
+    title = "rtemis ClusterConfig",
+    description = "Language-independent config for an rtemis clustering pipeline: a data reference, a `ClusteringConfig`, an `ExecutionConfig`, and an output directory.",
+    order = 6L,
+    kind = "pipeline",
+    record_provenance = "rtemis::Provenance",
+    record_metrics = "rtemis::ClusteringMetrics"
+  )
+) # /rtemis::ClusterConfig
+
+
+# %% repr.ClusterConfig ----
+#' Repr ClusterConfig
+#'
+#' @param x `ClusterConfig` object.
+#' @param pad Integer: Number of spaces to pad the message with.
+#' @param output_type Character {"ansi", "html", or "plain"}: Output type.
+#'
+#' @return Character: Formatted string that can be printed with cat()
+#'
+#' @author EDG
+#' @noRd
+method(repr, ClusterConfig) <- function(x, pad = 0L, output_type = NULL) {
+  out <- repr_S7name("ClusterConfig", pad = pad, output_type = output_type)
+  out <- paste0(
+    out,
+    repr_ls(props(x), pad = pad, limit = 20L, output_type = output_type)
+  )
+  out
+} # /rtemis::repr.ClusterConfig
+
+
+# %% print.ClusterConfig ----
+#' Print `ClusterConfig`
+#'
+#' @param x `ClusterConfig` object.
+#' @param ... Not used.
+#'
+#' @author EDG
+#' @noRd
+method(print, ClusterConfig) <- function(x, output_type = NULL, ...) {
+  cat(repr(x, output_type = output_type))
+  invisible(x)
+} # /rtemis::print.ClusterConfig
+
+
+# %% setup_ClusterConfig ----
+#' Setup ClusterConfig
+#'
+#' Setup a `ClusterConfig` object. `ClusterConfig` is a portable, data-agnostic
+#' recipe for a clustering pipeline: `dat_path` is optional, so the same config
+#' can be validated, shared, or described without data and have a path bound
+#' later (e.g. by the `rtemis` CLI) before [cluster].
+#'
+#' @param dat_path Character or NULL: Path to input data file. NULL leaves the
+#' recipe unbound; set it (or supply data) before [cluster].
+#' @param clustering_config `ClusteringConfig` object or NULL: Configuration for
+#' the clustering itself, naming the algorithm, its settings and the feature
+#' columns to cluster on. Setup with a clustering `setup_*` function, e.g.
+#' [setup_KMeans]. If NULL, [cluster] runs its default algorithm with default
+#' settings.
+#' @param execution_config `ExecutionConfig` object: Execution settings, e.g.
+#' [setup_FutureExecution]. Its seed seeds the fit.
+#' @param outdir Character: Output directory for results.
+#' @param verbosity Integer [0, Inf): Verbosity level.
+#'
+#' @return `ClusterConfig` object.
+#'
+#' @author EDG
+#' @export
+#' @examples
+#' cc <- setup_ClusterConfig(
+#'   dat_path = "data.csv",
+#'   clustering_config = setup_KMeans(k = 3L),
+#'   outdir = "results/"
+#' )
+setup_ClusterConfig <- function(
+  dat_path = NULL,
+  clustering_config = NULL,
+  execution_config = setup_FutureExecution(),
+  outdir = "results/",
+  verbosity = 1L
+) {
+  apply_setup_defaults(ClusterConfig)
+  # Validated, not resolved: a config is a portable recipe, so it stores the
+  # path as its author wrote it, unresolved against this machine's working
+  # directory.
+  if (!is.null(dat_path)) {
+    dat_path <- sanitize_path(dat_path, must_exist = FALSE, normalize = FALSE)
+  }
+  outdir <- sanitize_path(
+    outdir,
+    must_exist = FALSE,
+    type = "any",
+    normalize = FALSE
+  )
+
+  ClusterConfig(
+    dat_path = dat_path,
+    clustering_config = clustering_config,
+    execution_config = execution_config,
+    outdir = outdir,
+    verbosity = as.integer(verbosity)
+  )
+} # /rtemis::setup_ClusterConfig
+
+
+# %% .list_to_ClusterConfig ----
+#' Convert a list to a `ClusterConfig` object
+#'
+#' Internal function used by [read_config] to reconstruct a `ClusterConfig` from
+#' a named list, such as the result of parsing a JSON config. The nested
+#' `clustering_config` is rebuilt via `.list_to_ClusteringConfig()`.
+#'
+#' @param x Named list carrying `ClusterConfig` fields (e.g. `dat_path`,
+#'   `clustering_config`, `outdir`).
+#'
+#' @return `ClusterConfig` object.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+.list_to_ClusterConfig <- function(x) {
+  check_wire_keys(x, names(ClusterConfig@properties), "cluster config")
+  args <- list(
+    dat_path = x[["dat_path"]],
+    clustering_config = if (is.null(x[["clustering_config"]])) {
+      NULL
+    } else {
+      .list_to_ClusteringConfig(x[["clustering_config"]])
+    }
+  )
+  # `execution_config`, `outdir` and `verbosity` carry non-NULL defaults in
+  # `setup_ClusterConfig`; only override them when the config actually supplies
+  # a value, so a portable recipe that omits them keeps the defaults.
+  if (!is.null(x[["execution_config"]])) {
+    args[["execution_config"]] <- .list_to_ExecutionConfig(
+      x[["execution_config"]]
+    )
+  }
+  if (!is.null(x[["outdir"]])) {
+    args[["outdir"]] <- x[["outdir"]]
+  }
+  if (!is.null(x[["verbosity"]])) {
+    args[["verbosity"]] <- x[["verbosity"]]
+  }
+  do.call(setup_ClusterConfig, args)
+} # /rtemis::.list_to_ClusterConfig

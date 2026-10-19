@@ -2,6 +2,47 @@
 # ::rtemis::
 # 2016- EDG rtemis.org
 
+#' Evaluate an expression under a fixed seed, leaving the RNG as it was
+#'
+#' `set.seed()` mutates the global RNG state, so seeding an internal
+#' computation would otherwise change every random draw a caller makes
+#' afterwards -- a reproducible fold assignment inside one algorithm should not
+#' reach into the user's session or the next model in a pipeline.
+#'
+#' `.Random.seed` is restored on exit, and removed again if the expression
+#' created it in a session that had not yet drawn a random number.
+#'
+#' @param seed Optional Integer: Seed to set. NULL evaluates `expr` under the
+#' ambient RNG and restores nothing.
+#' @param expr Expression: Evaluated after the seed is set. Lazily evaluated,
+#' so it must not be forced before this call.
+#'
+#' @return The value of `expr`.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+with_seed <- function(seed, expr) {
+  if (is.null(seed)) {
+    return(expr)
+  }
+  if (exists(".Random.seed", envir = globalenv(), inherits = FALSE)) {
+    old_seed <- get(".Random.seed", envir = globalenv(), inherits = FALSE)
+    on.exit(
+      assign(".Random.seed", old_seed, envir = globalenv()),
+      add = TRUE
+    )
+  } else {
+    on.exit(
+      suppressWarnings(rm(".Random.seed", envir = globalenv())),
+      add = TRUE
+    )
+  }
+  set.seed(seed)
+  expr
+} # /rtemis::with_seed
+
+
 #' Print range of continuous variable
 #'
 #' @param x Numeric vector
@@ -128,7 +169,6 @@ filter_order <- function(x, idl, decreasing = FALSE) {
 #'
 #' @author EDG
 #' @export
-#'
 #' @examples
 #' x <- c(9, 3, 4, 4, 0, 2, 2, NA)
 #' get_mode(x)
@@ -182,7 +222,6 @@ get_mode <- function(
 #'
 #' @author EDG
 #' @export
-#'
 #' @examples
 #' x <- rep(9, 1000000)
 #' is_constant(x)
@@ -196,20 +235,6 @@ is_constant <- function(x, skip_missing = FALSE) {
   }
   isTRUE(all(x == x[1]))
 } # /rtemis::is_constant
-
-
-#' Check if variable is discrete (factor or integer)
-#'
-#' @param x Input
-#'
-#' @return Logical.
-#'
-#' @author EDG
-#' @keywords internal
-#' @noRd
-is_discrete <- function(x) {
-  is.factor(x) || is.integer(x) || is.logical(x) || is.character(x)
-} # /rtemis::is_discrete
 
 
 #' Return object if it has length > 0
@@ -266,7 +291,6 @@ singorplu <- function(n, x) {
 #'
 #' @author EDG
 #' @export
-#'
 #' @examples
 #' x <- rnorm(20)
 #' size(x)
@@ -327,7 +351,6 @@ recycle <- function(x, target) {
 #'
 #' @author EDG
 #' @export
-#'
 #' @examples
 #' x <- rnormmat(20, 5, mean = 12, sd = 6, return_df = TRUE, seed = 2026)
 #' x
@@ -374,7 +397,6 @@ rnormmat <- function(
 #'
 #' @author EDG
 #' @export
-#'
 #' @examples
 #' x <- runifmat(20, 5, min = 12, max = 18, return_df = TRUE, seed = 2026)
 #' x
@@ -410,7 +432,6 @@ runifmat <- function(
 #'
 #' @author EDG
 #' @export
-#'
 #' @examples
 #' rtversion()
 rtversion <- function() {
@@ -432,7 +453,6 @@ rtversion <- function() {
 #'
 #' @author EDG
 #' @export
-#'
 #' @examples
 #' setdiff(1:10, 1:5)
 #' setdiff(1:5, 1:10)
@@ -455,7 +475,6 @@ setdiffsym <- function(x, y) {
 #'
 #' @author EDG
 #' @export
-#'
 #' @examples
 #' \dontrun{
 #' # Will create "my_project" directory with

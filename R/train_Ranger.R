@@ -24,7 +24,7 @@ method(train_, RangerHyperparameters) <- function(
   x,
   weights = NULL,
   dat_validation = NULL,
-  execution_config = setup_ExecutionConfig(),
+  execution_config = setup_FutureExecution(),
   verbosity = 1L
 ) {
   # Dependencies ----
@@ -38,15 +38,10 @@ method(train_, RangerHyperparameters) <- function(
       class = c("rtemis_value_error", "rtemis_input_error")
     )
   }
-  # mtry cannot be larger than number of features
-  if (any(hyperparameters@hyperparameters[["mtry"]] > NCOL(features(x)))) {
-    rtemis.core::abort(
-      "mtry cannot be greater than number of features: ",
-      ncol(features(x)),
-      ".",
-      class = c("rtemis_range_error", "rtemis_input_error")
-    )
-  }
+  # Data-dependent constraints (mtry, class_weights,
+  # always_split_variables) are declared via `data_bound` on the properties and
+  # checked by train() via validate_hyperparameters(), before tuning and again
+  # before this call.
 
   # Data ----
   check_supervised(
@@ -55,6 +50,19 @@ method(train_, RangerHyperparameters) <- function(
     verbosity = verbosity
   )
   type <- supervised_type(x)
+  # ranger takes class weights in the order of the outcome's levels.
+  class_weights <- hyperparameters@hyperparameters[["class_weights"]]
+  if (type == "Classification" && !is.null(names(class_weights))) {
+    if (!setequal(names(class_weights), levels(outcome(x)))) {
+      rtemis.core::abort(
+        "`class_weights` names must be the outcome's levels: ",
+        paste(levels(outcome(x)), collapse = ", "),
+        ".",
+        class = c("rtemis_value_error", "rtemis_input_error")
+      )
+    }
+    class_weights <- class_weights[levels(outcome(x))]
+  }
 
   # Train ----
   model <- ranger::ranger(
@@ -72,6 +80,7 @@ method(train_, RangerHyperparameters) <- function(
     replace = hyperparameters@hyperparameters[["replace"]],
     sample.fraction = hyperparameters@hyperparameters[["sample_fraction"]],
     case.weights = weights,
+    class.weights = if (type == "Classification") class_weights,
     splitrule = hyperparameters@hyperparameters[["splitrule"]],
     num.random.splits = hyperparameters@hyperparameters[["num_random_splits"]],
     alpha = hyperparameters@hyperparameters[["alpha"]],
@@ -110,7 +119,43 @@ method(train_, RangerHyperparameters) <- function(
     na.action = hyperparameters@hyperparameters[["na_action"]]
   )
   check_inherits(model, "ranger")
-  list(model = model, preprocessor = NULL)
+  # Settings that change what the importance measures, which the fitted
+  # forest does not record: ranger scales permutation importance only when
+  # local importance is off, and in holdout mode computes it on the held-out
+  # cases.
+  hp <- hyperparameters@hyperparameters
+  model[["rtemis_importance_scaled"]] <- identical(
+    hp[["importance"]],
+    "permutation"
+  ) &&
+    !isTRUE(hp[["local_importance"]]) &&
+    isTRUE(hp[["scale_permutation_importance"]])
+  model[["rtemis_holdout"]] <- isTRUE(hp[["holdout"]])
+  model[["rtemis_gain_regularized"]] <- !is.null(hp[[
+    "regularization_factor"
+  ]]) &&
+    any(hp[["regularization_factor"]] < 1)
+  # ranger resolves these when they are unset: `mtry`, `min.node.size` and
+  # `splitrule` are on the fitted forest, and unordered factors are
+  # partitioned only by extratrees.
+  hyperparameters <- record_backend_values(
+    hyperparameters,
+    list(
+      mtry = as.integer(model[["mtry"]]),
+      min_node_size = as.integer(model[["min.node.size"]]),
+      splitrule = model[["splitrule"]],
+      # ranger's terminal-node minimum outside survival forests.
+      min_bucket = 1L,
+      respect_unordered_factors = if (
+        identical(model[["splitrule"]], "extratrees")
+      ) {
+        "partition"
+      } else {
+        "ignore"
+      }
+    )
+  )
+  list(model = model, preprocessor = NULL, hyperparameters = hyperparameters)
 } # /rtemis::train_.RangerHyperparameters
 
 #' Predict from Ranger model
@@ -128,17 +173,28 @@ method(predict_super, class_ranger) <- function(
   model,
   newdata,
   type = NULL,
+  execution_config = NULL,
   verbosity = 0L
 ) {
   check_inherits(model, "ranger")
   check_inherits(newdata, "data.frame")
 
   # Predict ----
-  predicted <- predict(
-    model,
-    data = newdata,
-    type = "response",
-    verbose = verbosity > 0L
+  # `ranger::predict()` draws its C++ seed from the R stream when none is
+  # given, so an unwrapped call advances the caller's RNG by one -- and a
+  # construction that predicts once per fold advances it by the fold count.
+  # The caller's state is preserved around the call: ranger sees the same state
+  # it would have, so the prediction is unchanged.
+  predicted <- with_preserved_rng(
+    predict(
+      model,
+      data = newdata,
+      # ranger's own default reads R's `Ncpus` option, which a host can set to
+      # every core; the prediction's resolved count is passed instead.
+      num.threads = algorithm_threads(execution_config),
+      type = "response",
+      verbose = verbosity > 0L
+    )
   )[["predictions"]]
   if (type == "Classification" && NCOL(predicted) == 2L) {
     # In binary classification, ranger returns matrix with 2 columns
@@ -147,6 +203,82 @@ method(predict_super, class_ranger) <- function(
   }
   predicted
 } # /rtemis::predict_super.class_ranger
+
+
+# %% quantile_super.class_ranger ----
+#' Predict quantiles from a Ranger model
+#'
+#' A quantile regression forest keeps the training outcomes reaching each
+#' terminal node, so one fitted forest answers every level and CQR needs no
+#' second fit. That store is what `quantreg = TRUE` builds; without it the
+#' forest holds node means and cannot answer at all, and the error names that
+#' training setting.
+#'
+#' `keep_inbag` is not required here. It records which cases each tree was
+#' grown on, which quantiles of the *training* data need and quantiles of new
+#' data do not.
+#'
+#' @param model `ranger` model object.
+#' @param newdata tabular data: Cases to predict.
+#' @param quantiles Numeric (0, 1): Levels to predict, in increasing order.
+#'
+#' @return Numeric matrix, one row per case and one column per level.
+#'
+#' @keywords internal
+#' @noRd
+method(quantile_super, class_ranger) <- function(model, newdata, quantiles) {
+  check_inherits(model, "ranger")
+  check_inherits(newdata, "data.frame")
+  if (is.null(model[["random.node.values"]])) {
+    rtemis.core::abort(
+      "This Ranger forest was not trained for quantile prediction, so it ",
+      "holds node means rather than the outcomes a quantile is read from.\n",
+      "Retrain with `setup_Ranger(quantreg = TRUE)`.",
+      class = c("rtemis_unsupported_error", "rtemis_input_error")
+    )
+  }
+  predicted <- with_preserved_rng(
+    predict(
+      model,
+      data = newdata,
+      num.threads = 1L,
+      type = "quantiles",
+      quantiles = quantiles
+    )
+  )[["predictions"]]
+  # One level comes back as a bare vector; the caller reads columns either way.
+  matrix(predicted, nrow = nrow(newdata), ncol = length(quantiles))
+} # /rtemis::quantile_super.class_ranger
+
+
+# %% ranger_split_criterion ----
+#' The split criterion of a fitted ranger forest, as words
+#'
+#' @param model `ranger` object.
+#'
+#' @return Character.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+ranger_split_criterion <- function(model) {
+  regression <- model[["treetype"]] == "Regression"
+  switch(
+    model[["splitrule"]] %||% if (regression) "variance" else "gini",
+    gini = "Gini index",
+    hellinger = "Hellinger distance",
+    variance = "variance of the outcome",
+    extratrees = if (regression) {
+      "variance of the outcome, at randomly drawn split points"
+    } else {
+      "Gini index, at randomly drawn split points"
+    },
+    maxstat = "maximally selected rank statistic",
+    beta = "beta log-likelihood",
+    poisson = "Poisson deviance",
+    model[["splitrule"]]
+  )
+} # /rtemis::ranger_split_criterion
 
 
 # %% varimp_super.class_ranger ----
@@ -158,44 +290,70 @@ method(predict_super, class_ranger) <- function(
 #' @noRd
 method(varimp_super, class_ranger) <- function(model) {
   check_inherits(model, "ranger")
+  mode <- model[["importance.mode"]]
+  if (is.null(mode) || mode == "none") {
+    return(NULL)
+  }
   vi <- ranger::importance(model)
-  VariableImportance(
-    data.table(
-      variable = names(vi),
-      importance = unname(vi)
+  criterion <- ranger_split_criterion(model)
+  regularized <- if (isTRUE(model[["rtemis_gain_regularized"]])) {
+    paste0(
+      ", with the gain of splits on predictors new to the forest multiplied ",
+      "by the regularization factor"
+    )
+  } else {
+    ""
+  }
+  held_out <- isTRUE(model[["rtemis_holdout"]])
+  measure <- switch(
+    mode,
+    impurity = importance_measure(
+      names(vi),
+      unname(vi),
+      kind = "split_gain",
+      description = paste0(
+        "Decrease in the split criterion (",
+        criterion,
+        ") from splits on the predictor, summed over the splits of each tree ",
+        "on its sample of training cases and averaged over trees",
+        regularized,
+        " (ranger)."
+      )
+    ),
+    impurity_corrected = importance_measure(
+      names(vi),
+      unname(vi),
+      kind = "corrected_split_gain",
+      signed = TRUE,
+      description = paste0(
+        "Actual impurity reduction: the decrease in the split criterion (",
+        criterion,
+        ") from splits on the predictor, corrected by permuted copies of the ",
+        "predictors for the bias of impurity measures toward predictors with ",
+        "many split points; a small or negative value is a small estimated ",
+        "importance (ranger)."
+      )
+    ),
+    permutation = importance_measure(
+      names(vi),
+      unname(vi),
+      kind = "permutation",
+      computed_on = if (held_out) "held_out" else "out_of_bag",
+      signed = TRUE,
+      description = paste0(
+        "Increase in prediction error on ",
+        if (held_out) {
+          "the held-out cases (case weight 0)"
+        } else {
+          "each tree's out-of-bag cases"
+        },
+        " when the predictor's values are permuted, averaged over trees",
+        if (isTRUE(model[["rtemis_importance_scaled"]])) {
+          " and divided by its standard error"
+        },
+        " (ranger)."
+      )
     )
   )
+  VariableImportance(measures = list(importance = measure))
 } # /rtemis::varimp_super.class_ranger
-
-
-# %% validate_hyperparameters.RangerHyperparameters ----
-#' Validate Ranger Hyperparameters
-#'
-#' Validate Ranger Hyperparameters given training data.
-#'
-#' @param x tabular data: Training data.
-#' @param hyperparameters `RangerHyperparameters`: Hyperparameters to check.
-#'
-#' @return NULL. Will throw error if hyperparameters are invalid.
-#'
-#' @keywords internal
-#' @noRd
-method(validate_hyperparameters, RangerHyperparameters) <- function(
-  x,
-  hyperparameters
-) {
-  check_is_S7(x, class_data.frame)
-  check_is_S7(hyperparameters, RangerHyperparameters)
-
-  # Check mtry
-  if (any(hyperparameters@hyperparameters[["mtry"]] > NCOL(features(x)))) {
-    rtemis.core::abort(
-      "mtry cannot be greater than number of features: ",
-      ncol(features(x)),
-      ".",
-      class = c("rtemis_range_error", "rtemis_input_error")
-    )
-  }
-
-  hyperparameters
-} # /rtemis::validate_hyperparameters.RangerHyperparameters

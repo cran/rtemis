@@ -4,19 +4,42 @@
 \alias{decomp}
 \title{Perform Data Decomposition}
 \usage{
-decomp(x, algorithm = "ICA", config = NULL, outdir = NULL, verbosity = 1L)
+decomp(
+  x,
+  algorithm = "ICA",
+  config = NULL,
+  execution_config = setup_FutureExecution(),
+  outdir = NULL,
+  verbosity = 1L
+)
 }
 \arguments{
 \item{x}{Matrix, data frame, or \code{DecomposeConfig} object: Input data, or a
 \code{DecomposeConfig} recipe (from \link{setup_DecomposeConfig}) carrying the data
 path, algorithm config, and output directory.}
 
-\item{algorithm}{Character: Decomposition algorithm.}
+\item{algorithm}{Character: Decomposition algorithm. Not needed when \code{config}
+is supplied, which names its own; an explicit \code{algorithm} that disagrees
+with \code{config} is an error.}
 
-\item{config}{DecompositionConfig: Algorithm-specific config.}
+\item{config}{DecompositionConfig: Algorithm-specific config. Its \code{features}
+selects the columns of \code{x} to decompose; \code{NULL} selects every numeric column,
+since a decomposition reads a numeric matrix. The returned object's config
+carries the resolved names, and \code{apply_decomp()} replays that selection.}
+
+\item{execution_config}{\code{ExecutionConfig} object: Execution settings, e.g.
+\link{setup_FutureExecution} or \link{setup_SerialExecution}. A decomposition dispatches
+no work to other processes: an algorithm whose \code{threaded} trait is TRUE (see
+\link{decomposition_traits}) runs on \code{n_workers_algorithm} threads, or on the
+config's worker count when that is unset. Its \code{device} is the compute device
+of an algorithm that can use one (\link{setup_Autoencoder}); every other algorithm
+runs on the CPU. The config's \code{seed} seeds the fit, torch's generator
+included.}
 
 \item{outdir}{Character, optional: Output directory. If not NULL, the returned
-\code{Decomposition} object is saved there as an \code{.rds} file.}
+\code{Decomposition} object is saved there as an \code{.rds} file, alongside a run
+record (\verb{decomp_<algorithm>.record.json}) stating what the run resolved. See
+\link{write_record}.}
 
 \item{verbosity}{Integer: Verbosity level.}
 }

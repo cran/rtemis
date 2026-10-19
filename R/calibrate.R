@@ -2,6 +2,49 @@
 # ::rtemis::
 # 2025- EDG rtemis.org
 
+# %% calibration_hyperparameters ----
+#' Resolve the requested calibrator
+#'
+#' NULL means the caller expressed no preference and gets the default
+#' calibrator. Any `Hyperparameters` object is accepted, but only a monotonic
+#' algorithm is a safe calibration map -- see `calibration_algorithms`.
+#'
+#' @param hyperparameters Optional `Hyperparameters` object.
+#'
+#' @return `Hyperparameters` object.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+calibration_hyperparameters <- function(hyperparameters) {
+  if (is.null(hyperparameters)) {
+    return(setup_Isotonic())
+  }
+  check_is_S7(hyperparameters, Hyperparameters)
+  hyperparameters
+} # /rtemis::calibration_hyperparameters
+
+
+# %% calibration_execution ----
+#' Resolve the execution config calibration models are trained under
+#'
+#' @param execution_config Optional `ExecutionConfig` object.
+#'
+#' @return `ExecutionConfig` object: `execution_config`, or a serial config
+#'   when NULL.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+calibration_execution <- function(execution_config) {
+  if (is.null(execution_config)) {
+    return(setup_SerialExecution())
+  }
+  check_is_S7(execution_config, ExecutionConfig)
+  execution_config
+} # /rtemis::calibration_execution
+
+
 # %% calibrate.Classification ----
 #' Calibrate Binary Classification Models
 #'
@@ -15,10 +58,15 @@
 #' model's training data.
 #'
 #' @param x `Classification` object.
-#' @param predicted_probabilities Numeric vector: Predicted probabilities.
+#' @param predicted_probabilities Numeric vector \[0, 1\]: Predicted
+#'   probabilities of the positive class, one per case. `@predicted_prob_*`
+#'   holds them as a one-column matrix, so pass `positive_prob()` of it or
+#'   index the column.
 #' @param true_labels Factor: True class labels.
-#' @param algorithm Character: Algorithm to use to train calibration model.
-#' @param hyperparameters `Hyperparameters` object: Setup using one of `setup_*` functions.
+#' @param hyperparameters Optional `Hyperparameters` object: Setup using one of
+#' `setup_*` functions. NULL uses [setup_Isotonic].
+#' @param execution_config Optional `ExecutionConfig` object: Config the
+#' calibration model is trained under. NULL trains it serially.
 #' @param verbosity Integer: Verbosity level.
 #' @param ... Not used
 #'
@@ -34,30 +82,33 @@
 #'   iris[51:150, ]
 #' )
 #' res <- resample(datc2)
-#' datc2$Species <- factor(datc2$Species)
+#' datc2[["Species"]] <- factor(datc2[["Species"]])
 #' datc2_train <- datc2[res[[1]], ]
 #' datc2_test <- datc2[-res[[1]], ]
 #' mod_c_glm <- train(
 #'   x = datc2_train,
 #'   dat_test = datc2_test,
-#'   algorithm = "glm"
+#'   hyperparameters = setup_GLM()
 #' )
 #' mod_c_glm_cal <- calibrate(
 #'   mod_c_glm,
-#'   predicted_probabilities = mod_c_glm$predicted_prob_training,
-#'   true_labels = mod_c_glm$y_training
+#'   predicted_probabilities = mod_c_glm[["predicted_prob_training"]][, 1L],
+#'   true_labels = mod_c_glm[["y_training"]]
 #' )
 #' mod_c_glm_cal
 method(calibrate, Classification) <- function(
   x,
   predicted_probabilities,
   true_labels,
-  algorithm = "isotonic",
   hyperparameters = NULL,
+  execution_config = NULL,
   verbosity = 1L,
   ...
 ) {
   # Check inputs
+  hyperparameters <- calibration_hyperparameters(hyperparameters)
+  execution_config <- calibration_execution(execution_config)
+  predicted_probabilities <- positive_prob(predicted_probabilities)
   check_float01inc(predicted_probabilities)
   check_inherits(true_labels, "factor")
 
@@ -66,7 +117,7 @@ method(calibrate, Classification) <- function(
   # Test data is taken from mod, if available
   if (!is.null(x@y_test) && !is.null(x@predicted_prob_test)) {
     dat_test <- data.table(
-      predicted_probabilities = x@predicted_prob_test,
+      predicted_probabilities = positive_prob(x@predicted_prob_test),
       true_labels = x@y_test
     )
   } else {
@@ -84,8 +135,8 @@ method(calibrate, Classification) <- function(
   cal_model <- train(
     dat,
     dat_test = dat_test,
-    algorithm = algorithm,
     hyperparameters = hyperparameters,
+    execution_config = execution_config,
     verbosity = verbosity
   )
 
@@ -106,9 +157,11 @@ method(calibrate, Classification) <- function(
 #' Calibrate Resampled Classification Models
 #'
 #' @param x `ClassificationRes` object.
-#' @param algorithm Character: Algorithm to use to train calibration model.
-#' @param hyperparameters `Hyperparameters` object: Setup using one of `setup_*` functions.
+#' @param hyperparameters Optional `Hyperparameters` object: Setup using one of
+#' `setup_*` functions. NULL uses [setup_Isotonic].
 #' @param resampler_config `ResamplerConfig` object: Configuration for resampling during calibration model training.
+#' @param execution_config Optional `ExecutionConfig` object: Config the
+#' calibration models are trained under. NULL trains them serially.
 #' @param train_verbosity Integer: Verbosity level for training calibration models.
 #' @param verbosity Integer: Verbosity level.
 #' @param ... Not used
@@ -119,23 +172,23 @@ method(calibrate, Classification) <- function(
 #' @noRd
 method(calibrate, ClassificationRes) <- function(
   x,
-  algorithm = "isotonic",
   hyperparameters = NULL,
-  resampler_config = setup_Resampler(
-    n_resamples = 5L,
-    type = "KFold"
+  resampler_config = setup_KFold(
+    n_resamples = 5L
   ),
+  execution_config = NULL,
   train_verbosity = 0L,
   verbosity = 1L,
   ...
 ) {
   # Check inputs
-  check_inherits(algorithm, "character")
+  hyperparameters <- calibration_hyperparameters(hyperparameters)
+  execution_config <- calibration_execution(execution_config)
   check_is_S7(resampler_config, ResamplerConfig)
   verbosity <- clean_int(verbosity)
 
   # Check IFW is FALSE
-  if (!is.null(hyperparameters) && hyperparameters[["ifw"]]) {
+  if (isTRUE(hyperparameters[["ifw"]])) {
     rtemis.core::abort(
       "IFW must be FALSE for proper calibration.",
       class = c("rtemis_value_error", "rtemis_input_error")
@@ -155,14 +208,14 @@ method(calibrate, ClassificationRes) <- function(
     x@models,
     function(mod) {
       dat <- data.table(
-        predicted_probabilities = mod@predicted_prob_test,
+        predicted_probabilities = positive_prob(mod@predicted_prob_test),
         true_labels = mod@y_test
       )
       train(
         dat,
-        algorithm = algorithm,
         hyperparameters = hyperparameters,
         outer_resampling_config = resampler_config,
+        execution_config = execution_config,
         verbosity = train_verbosity
       )
     }

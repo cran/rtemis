@@ -21,23 +21,31 @@ test_that("to_json() is a registered S7 generic", {
 
 
 # Supervised (Regression) ----
-mod_r_glm <- train(x = datr, algorithm = "glm")
+mod_r_glm <- train(x = datr, hyperparameters = setup_GLM())
 
-test_that("to_json(Regression) returns a list with .class and core fields", {
+test_that("to_json(Regression) returns a list with the core fields", {
   j <- to_json(mod_r_glm)
   expect_type(j, "list")
-  expect_equal(j[[".class"]], "Regression")
   expect_equal(j[["type"]], "Regression")
   expect_true(is.character(j[["xnames"]]))
   expect_equal(j[["n_features"]], length(mod_r_glm@xnames))
 })
 
-test_that("to_json(Regression) recurses into nested S7 props with .class tags", {
+test_that("to_json(Regression) recurses into nested S7 props", {
   j <- to_json(mod_r_glm)
   expect_true(is.list(j[["metrics_training"]]))
-  expect_true(".class" %in% names(j[["metrics_training"]]))
   expect_true(is.list(j[["execution_config"]]))
-  expect_equal(j[["execution_config"]][[".class"]], "ExecutionConfig")
+  expect_setequal(
+    names(j[["execution_config"]]),
+    c(
+      published_prop_names(S7_class(prop(mod_r_glm, "execution_config"))),
+      "$schema"
+    )
+  )
+  expect_identical(
+    j[["execution_config"]][["$schema"]],
+    "https://schema.rtemis.org/execution/r/v1/schema.json"
+  )
 })
 
 test_that("to_json(Regression) is JSON-serializable and round-trips", {
@@ -45,7 +53,6 @@ test_that("to_json(Regression) is JSON-serializable and round-trips", {
   txt <- jsonlite::toJSON(j, auto_unbox = TRUE, na = "null", null = "null")
   expect_true(jsonlite::validate(txt))
   parsed <- jsonlite::fromJSON(txt, simplifyVector = FALSE)
-  expect_equal(parsed[[".class"]], "Regression")
   expect_equal(parsed[["type"]], "Regression")
 })
 
@@ -55,7 +62,6 @@ test_that("to_json(Regression) excludes model, raw vectors, session_info", {
   expect_false("y_training" %in% names(j))
   expect_false("predicted_training" %in% names(j))
   expect_false("session_info" %in% names(j))
-  expect_false("extra" %in% names(j))
 })
 
 test_that("to_json(Regression) drops NULL fields cleanly", {
@@ -66,12 +72,12 @@ test_that("to_json(Regression) drops NULL fields cleanly", {
 
 # Supervised (Classification) ----
 datc <- data.frame(iris[51:150, ])
-datc$Species <- factor(datc$Species)
-mod_c_glm <- train(x = datc, algorithm = "glm")
+datc[["Species"]] <- factor(datc[["Species"]])
+mod_c_glm <- train(x = datc, hyperparameters = setup_GLM())
 
-test_that("to_json(Classification) tags class and includes binclasspos", {
+test_that("to_json(Classification) includes binclasspos", {
   j <- to_json(mod_c_glm)
-  expect_equal(j[[".class"]], "Classification")
+  expect_equal(j[["type"]], "Classification")
   expect_true("binclasspos" %in% names(j))
   expect_true(is.integer(j[["binclasspos"]]))
 })
@@ -80,14 +86,13 @@ test_that("to_json(Classification) tags class and includes binclasspos", {
 # SupervisedRes ----
 resmod <- train(
   x = datr,
-  algorithm = "glm",
-  outer_resampling_config = setup_Resampler(n_resamples = 3L, type = "KFold")
+  hyperparameters = setup_GLM(),
+  outer_resampling_config = setup_KFold(n_resamples = 3L)
 )
 
-test_that("to_json(RegressionRes) returns a list with .class and resample summary", {
+test_that("to_json(RegressionRes) returns a list with the resample summary", {
   j <- to_json(resmod)
   expect_type(j, "list")
-  expect_equal(j[[".class"]], "RegressionRes")
   expect_equal(j[["n_resamples"]], 3L)
   expect_true(is.list(j[["outer_resampler"]]))
   expect_true(is.list(j[["metrics_training"]]))
@@ -99,7 +104,6 @@ test_that("to_json(RegressionRes) is JSON-serializable", {
   txt <- jsonlite::toJSON(j, auto_unbox = TRUE, na = "null", null = "null")
   expect_true(jsonlite::validate(txt))
   parsed <- jsonlite::fromJSON(txt, simplifyVector = FALSE)
-  expect_equal(parsed[[".class"]], "RegressionRes")
   expect_equal(parsed[["n_resamples"]], 3L)
 })
 
@@ -110,9 +114,12 @@ test_that("to_json(RegressionRes) excludes models list (only summary count)", {
 
 
 # Default method ----
-test_that("default to_json walks props and tags .class for arbitrary S7 objects", {
-  exec <- setup_ExecutionConfig()
+test_that("default to_json emits exactly the published properties", {
+  exec <- setup_FutureExecution()
   j <- to_json(exec)
   expect_type(j, "list")
-  expect_equal(j[[".class"]], "ExecutionConfig")
+  # Exactly, in order: a results schema is `additionalProperties: false`, so an
+  # extra key makes the document invalid against the contract it is published
+  # under, and a missing one makes it incomplete.
+  expect_identical(names(j), published_prop_names(S7_class(exec)))
 })

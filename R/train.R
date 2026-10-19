@@ -2,6 +2,94 @@
 # ::rtemis::
 # 2025- EDG rtemis.org
 
+# %% resolve_weights_column ----
+#' Split a config's named weights column out of the data
+#'
+#' A config is a recipe over a data *path*, so it names the column holding the
+#' case weights. Training takes the values as a
+#' vector and expects the frame to hold features and the outcome only, so the
+#' column is read out here and dropped -- from the validation and test sets too,
+#' whose columns have to match the training features. Only the training set's
+#' values are returned: weights apply to fitting.
+#'
+#' @param datasets Named list of tabular data or NULL: the training, validation
+#'   and test sets, training first.
+#' @param column Character or NULL: Name of the weights column.
+#'
+#' @return Named list with `datasets` (the same list, column removed) and
+#'   `weights` (numeric vector, or NULL when `column` is NULL).
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+resolve_weights_column <- function(datasets, column) {
+  if (is.null(column)) {
+    return(list(datasets = datasets, weights = NULL))
+  }
+  training <- datasets[[1L]]
+  if (!column %in% names(training)) {
+    rtemis.core::abort(
+      "`weights` names column '",
+      column,
+      "', which the training data does not have. Columns: ",
+      paste(names(training), collapse = ", "),
+      ".",
+      class = c("rtemis_value_error", "rtemis_input_error")
+    )
+  }
+  if (identical(column, names(training)[[NCOL(training)]])) {
+    rtemis.core::abort(
+      "`weights` names column '",
+      column,
+      "', which is the outcome (the last column).",
+      class = c("rtemis_value_error", "rtemis_input_error")
+    )
+  }
+  weights <- training[[column]]
+  if (!is.numeric(weights)) {
+    rtemis.core::abort(
+      "Weights column '",
+      column,
+      "' must be numeric, not ",
+      class(weights)[[1L]],
+      ".",
+      class = c("rtemis_type_error", "rtemis_data_error")
+    )
+  }
+  datasets <- lapply(datasets, function(dataset) {
+    if (is.null(dataset) || !column %in% names(dataset)) {
+      return(dataset)
+    }
+    exc(dataset, column)
+  })
+  list(datasets = datasets, weights = as.numeric(weights))
+} # /rtemis::resolve_weights_column
+
+
+# %% restore_weights_column ----
+#' Put a config's weights column name back on a fitted model's input config
+#'
+#' A config dispatch resolves the named column to a vector before recursing, and
+#' the recursive call records what it was given -- a vector, which no config can
+#' express, so it records nothing. This restores the name, so the model's input
+#' config says what the user actually asked for.
+#'
+#' @param model `Supervised` or `SupervisedRes` object.
+#' @param column Character or NULL: Name of the weights column.
+#'
+#' @return `model`.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+restore_weights_column <- function(model, column) {
+  if (!is.null(column) && !is.null(model@config)) {
+    model@config@weights <- column
+  }
+  model
+} # /rtemis::restore_weights_column
+
+
 # %% train ----
 #' Train Supervised Learning Models
 #'
@@ -13,39 +101,36 @@
 #' @param dat_validation Tabular data: Validation set data.
 #' @param dat_test Tabular data: Test set data.
 #' @param weights Optional vector of case weights.
-#' @param algorithm Character: Algorithm to use. Can be left NULL, if `hyperparameters` is defined.
-#' @param preprocessor_config Optional PreprocessorConfig object: Setup using [setup_Preprocessor].
+#' @param preprocessor_config Optional SupervisedPreprocessorConfig object: Setup using [setup_SupervisedPreprocessor].
 #' @param decomposition_config Optional DecompositionConfig object: Setup using a decomposition
 #'  `setup_*` function.
 #' @param hyperparameters `Hyperparameters` object: Setup using one of `setup_*` functions.
 #' @param tuner_config TunerConfig object: Setup using [setup_GridSearch].
-#' @param outer_resampling_config Optional ResamplerConfig object: Setup using [setup_Resampler].
+#' @param outer_resampling_config Optional ResamplerConfig object: Setup using
+#' one of the `setup_*` resampler functions, e.g. [setup_KFold].
 #' This defines the outer resampling method, i.e. the splitting into training and test sets for the
 #' purpose of assessing model performance. If NULL, no outer resampling is performed, in which case
 #' you might want to use a `dat_test` dataset to assess model performance on a single test set.
-#' @param execution_config `ExecutionConfig` object: Setup using [setup_ExecutionConfig]. This
-#' allows you to set backend ("future", "mirai", or "none"), number of workers, and future plan if
-#' using `backend = "future"`.
+#' @param execution_config `ExecutionConfig` object: Setup using
+#' [setup_SerialExecution], [setup_FutureExecution] or [setup_MiraiExecution].
+#' The function you call selects the backend; each sets the number of workers
+#' per dispatch level, and [setup_FutureExecution] additionally sets the future
+#' plan.
 #' @param question Optional character string defining the question that the model is trying to
 #' answer.
-#' @param outdir Character, optional: String defining the output directory.
+#' @param outdir Character, optional: String defining the output directory. The
+#' fitted model is saved there as `train_<algorithm>.rds`, alongside a run
+#' record, `train_<algorithm>.record.json`, stating what the run actually did:
+#' every value resolved, where each came from, and what produced it. See
+#' [write_record].
+#' @param preflight Logical: If TRUE, check the configuration against `x` with
+#' [validate_config] before training and stop on any finding of severity
+#' "error". Findings of severity "warning" are reported and training continues.
+#' Defaults to FALSE, except for a `SuperConfigTabular`, where it defaults to TRUE:
+#' that type binds its data in memory and is what a server hands a run it
+#' accepted on a client's behalf, so the check is that type's default. Pass
+#' FALSE explicitly to skip it.
 #' @param verbosity Integer: Verbosity level.
-#' @param progress Optional function: Callback invoked at progress
-#'   checkpoints during training. When supplied, called at each outer
-#'   resampling fold boundary as
-#'   `progress(stage, current, total, message)`:
-#'   \describe{
-#'     \item{`stage`}{Character. Currently `"outer_fold"`.}
-#'     \item{`current`}{Integer. 1-based index of the fold about to run.}
-#'     \item{`total`}{Integer. Total number of outer folds.}
-#'     \item{`message`}{Character. Human-readable line, e.g.
-#'       `"Outer fold 2/5"`.}
-#'   }
-#'   When `NULL`, the existing `cli::cli_progress_along()`
-#'   interactive progress bar runs untouched. Designed for non-interactive
-#'   callers (e.g. `rtemis.server`) that need to forward fold progress
-#'   over a wire protocol; errors raised by the callback are swallowed
-#'   so a broken sink cannot interrupt training.
 #' @param ... Not used.
 #'
 #' @details
@@ -71,6 +156,13 @@
 #' the learned parameters are stored in the returned Supervised or SupervisedRes object, and the
 #' preprocessing is applied on validation and test data.
 #'
+#' For missing values, prefer an algorithm that accepts them, such as LightGBM, LightRF, Ranger
+#' or CART. For an algorithm that requires complete data, impute with
+#' `setup_SupervisedPreprocessor(impute = TRUE)`, which uses mean and mode imputation by
+#' default. missRanger imputation is fitted on every training set, including every tuning
+#' resample, and multiplies the memory and computation of a run; see the Imputation section of
+#' [setup_SupervisedPreprocessor].
+#'
 #' **Binary Classification**
 #'
 #' For binary classification, the outcome should be a factor where *the 2nd level
@@ -88,13 +180,13 @@
 #'
 #' If using ***outer resampling***, you can set a seed when defining `outer_resampling_config`, e.g.
 #' ```r
-#' outer_resampling_config = setup_Resampler(n_resamples = 10L, type = "KFold", seed = 2026L)
+#' outer_resampling_config = setup_KFold(n_resamples = 10L, seed = 2026L)
 #' ```
 #' If using ***tuning with inner resampling***, you can set a seed when defining `tuner_config`,
 #' e.g.
 #' ```r
 #' tuner_config = setup_GridSearch(
-#'   resampler_config = setup_Resampler(n_resamples = 5L, type = "KFold", seed = 2027L)
+#'   resampler_config = setup_KFold(n_resamples = 5L, seed = 2027L)
 #' )
 #' ```
 #'
@@ -103,27 +195,37 @@
 #' There are three levels of parallelization that may be used during training:
 #'
 #' 1. Algorithm training (e.g. a parallelized learner like LightGBM)
-#' 2. Tuning (inner resampling, where multiple resamples can be processed in parallel)
+#' 2. Tuning (where the full hyperparameter combination x inner resample cross product is
+#' processed in parallel, not just the resamples)
 #' 3. Outer resampling (where multiple outer resamples can be processed in parallel)
 #'
-#' The `train()` function will automatically manage parallelization depending
-#' on:
-#' - The number of workers specified by the user using `n_workers`
-#' - Whether the training algorithm supports parallelization itself
-#' - Whether hyperparameter tuning is needed
+#' `train()` assigns all workers to exactly one of these levels, so that no two levels
+#' compete for the same cores. The level is chosen by the first of these that applies:
+#' the algorithm parallelizes itself, tuning is needed, outer resampling is set. A run
+#' that needs none of them is sequential.
+#'
+#' The workers, backend, and future plan all come from `execution_config`; see
+#' [setup_FutureExecution].
+#'
+#' **Reproducibility under parallelization**
+#'
+#' `execution_config` carries the master seed for the run's computation RNG, from which
+#' one independent substream per outer resample is derived and assigned by fold index.
+#' Results therefore do not depend on the backend, the number of workers, or the order
+#' folds happened to finish in: a parallel run reproduces its sequential counterpart
+#' exactly.
 #'
 #' @return Object of class `Regression(Supervised)`, `RegressionRes(SupervisedRes)`,
 #' `Classification(Supervised)`, or `ClassificationRes(SupervisedRes)`.
 #'
 #' @author EDG
 #' @export
-#'
 #' @examples
 #' \donttest{
 #' iris_c_lightRF <- train(
 #'    iris,
-#'    algorithm = "LightRF",
-#'    outer_resampling_config = setup_Resampler(),
+#'    hyperparameters = setup_LightRF(),
+#'    outer_resampling_config = setup_KFold(n_resamples = 3L)
 #' )
 #' }
 train <- function(
@@ -131,107 +233,152 @@ train <- function(
   dat_validation = NULL,
   dat_test = NULL,
   weights = NULL,
-  algorithm = NULL,
-  preprocessor_config = NULL, # PreprocessorConfig
+  preprocessor_config = NULL, # SupervisedPreprocessorConfig
   decomposition_config = NULL, # DecompositionConfig
   hyperparameters = NULL, # Hyperparameters
   tuner_config = NULL, # TunerConfig
   outer_resampling_config = NULL, # ResamplerConfig
-  execution_config = setup_ExecutionConfig(), # ExecutionConfig
+  execution_config = setup_FutureExecution(), # ExecutionConfig
   question = NULL,
   outdir = NULL,
+  preflight = FALSE,
   verbosity = 1L,
-  progress = NULL,
   ...
 ) {
-  # SuperConfigLive dispatch ----
-  if (S7_inherits(x, SuperConfigLive)) {
+  # SuperConfigTabular dispatch ----
+  if (S7_inherits(x, SuperConfigTabular)) {
+    # Checked unless the caller said otherwise. A `SuperConfigTabular` carries its
+    # training data, the shape in which a run submitted over the wire arrives;
+    # its submitter does not read the run's output, so a run that cannot answer
+    # the question asked is refused here. `missing()` sets the default because
+    # every dispatch shares one signature.
+    if (missing(preflight)) {
+      preflight <- TRUE
+    }
+    # What the run predicts, and from what -- the same projection the path-based
+    # dispatch applies, so a config means the same thing whether its data
+    # arrived as a file or over the wire. With both properties NULL this is a
+    # no-op and rtemis's last-column convention applies exactly as before.
+    live_frames <- lapply(
+      list(x@dat_training, x@dat_validation, x@dat_test),
+      function(dat) {
+        if (is.null(dat)) {
+          NULL
+        } else {
+          project_frame(dat, x@outcome, x@features, x@weights)
+        }
+      }
+    )
+    resolved <- resolve_weights_column(live_frames, x@weights)
     train_args <- list(
-      x = x@dat_training,
-      dat_validation = x@dat_validation,
-      dat_test = x@dat_test,
-      weights = x@weights,
+      x = resolved[["datasets"]][[1L]],
+      dat_validation = resolved[["datasets"]][[2L]],
+      dat_test = resolved[["datasets"]][[3L]],
+      weights = resolved[["weights"]],
       preprocessor_config = x@preprocessor_config,
       decomposition_config = x@decomposition_config,
-      algorithm = x@algorithm,
       hyperparameters = x@hyperparameters,
       tuner_config = x@tuner_config,
       outer_resampling_config = x@outer_resampling_config,
       execution_config = x@execution_config,
       question = x@question,
       outdir = x@outdir,
-      verbosity = x@verbosity,
-      progress = progress
+      preflight = preflight,
+      verbosity = x@verbosity
     )
     # `positive_class` is handled via `...` (not a formal arg) and aborts if
     # passed as NULL, so include it only when set.
     if (!is.null(x@positive_class)) {
       train_args[["positive_class"]] <- x@positive_class
     }
-    return(do.call(train, train_args))
-  } # / train.SuperConfigLive
+    return(restore_weights_column(do.call(train, train_args), x@weights))
+  } # / train.SuperConfigTabular
 
-  # SuperConfig dispatch ----
-  if (S7_inherits(x, SuperConfig)) {
-    # `SuperConfig` is a recipe: `dat_training_path` may be unbound. Require it
+  # SuperConfigPaths dispatch ----
+  if (S7_inherits(x, SuperConfigPaths)) {
+    # `SuperConfigPaths` is a recipe: `dat_training_path` may be unbound. Require it
     # at train time (the CLI sets it from its data argument before calling).
     if (is.null(x@dat_training_path)) {
       rtemis.core::abort(
-        "This `SuperConfig` has no `dat_training_path`; set it before training ",
+        "This `SuperConfigPaths` has no `dat_training_path`; set it before training ",
         '(e.g. `x@dat_training_path <- "data.parquet"`) or bind in-memory ',
-        "data via `SuperConfigLive`.",
+        "data via `SuperConfigTabular`.",
         class = c("rtemis_null_input", "rtemis_input_error")
       )
     }
-    dat_training <- read(x@dat_training_path, character2factor = TRUE)
+    # The config decides how its files are read, and the same way for all
+    # three: a validation set whose labels stayed character while training's
+    # became factors is a set `check_supervised()` rejects for a difference the
+    # caller never asked for.
+    c2f <- x@character2factor
+    dat_training <- read(x@dat_training_path, character2factor = c2f)
     dat_validation <- if (!is.null(x@dat_validation_path)) {
-      read(x@dat_validation_path)
+      read(x@dat_validation_path, character2factor = c2f)
     } else {
       NULL
     }
     dat_test <- if (!is.null(x@dat_test_path)) {
-      read(x@dat_test_path)
+      read(x@dat_test_path, character2factor = c2f)
     } else {
       NULL
     }
+    # What the run predicts, and from what. Applied to all three datasets for
+    # the reason `character2factor` is: sets whose columns differ from each
+    # other are rejected downstream for a difference the caller never asked for.
+    # With both properties NULL this is a no-op and rtemis's convention applies
+    # exactly as it did.
+    dat_training <- project_frame(
+      dat_training,
+      x@outcome,
+      x@features,
+      x@weights
+    )
+    if (!is.null(dat_validation)) {
+      dat_validation <- project_frame(
+        dat_validation,
+        x@outcome,
+        x@features,
+        x@weights
+      )
+    }
+    if (!is.null(dat_test)) {
+      dat_test <- project_frame(dat_test, x@outcome, x@features, x@weights)
+    }
     # Call train() with data and other parameters from config
+    resolved <- resolve_weights_column(
+      list(dat_training, dat_validation, dat_test),
+      x@weights
+    )
     train_args <- list(
-      x = dat_training,
-      dat_validation = dat_validation,
-      dat_test = dat_test,
-      weights = x@weights,
+      x = resolved[["datasets"]][[1L]],
+      dat_validation = resolved[["datasets"]][[2L]],
+      dat_test = resolved[["datasets"]][[3L]],
+      weights = resolved[["weights"]],
       preprocessor_config = x@preprocessor_config,
       decomposition_config = x@decomposition_config,
-      algorithm = x@algorithm,
       hyperparameters = x@hyperparameters,
       tuner_config = x@tuner_config,
       outer_resampling_config = x@outer_resampling_config,
       execution_config = x@execution_config,
       question = x@question,
       outdir = x@outdir,
-      verbosity = x@verbosity,
-      progress = progress
+      preflight = preflight,
+      verbosity = x@verbosity
     )
     # `positive_class` is handled via `...` (not a formal arg) and aborts if
     # passed as NULL, so include it only when set.
     if (!is.null(x@positive_class)) {
       train_args[["positive_class"]] <- x@positive_class
     }
-    return(do.call(train, train_args))
-  } # / train.SuperConfig
+    return(restore_weights_column(do.call(train, train_args), x@weights))
+  } # / train.SuperConfigPaths
 
   # Checks ----
-  if (is.null(hyperparameters) && is.null(algorithm)) {
-    rtemis.core::abort(
-      "You must define either `hyperparameters` or `algorithm`.",
-      class = c("rtemis_value_error", "rtemis_input_error")
-    )
-  }
 
   # Defense against invalid args
   extra_args <- list(...)
-  if (!is.null(extra_args[["positive_class"]])) {
-    positive_class <- extra_args[["positive_class"]]
+  positive_class <- extra_args[["positive_class"]]
+  if (!is.null(positive_class)) {
     x <- set_positive_class(x, positive_class)
     extra_args[["positive_class"]] <- NULL
   }
@@ -244,9 +391,76 @@ train <- function(
     )
   }
 
-  if (is.null(algorithm) && !is.null(hyperparameters)) {
-    algorithm <- hyperparameters@algorithm
+  if (is.null(hyperparameters)) {
+    hyperparameters <- setup_Ranger()
   }
+  # A plain list of `Hyperparameters` is the user-facing form of a set, coerced
+  # here so nothing downstream sees a bare list. Coercing at the boundary rather
+  # than teaching the internals to accept a list is what keeps `needs_tuning()`
+  # and its siblings from needing a `class_list` method, which would claim the
+  # bare list type across the package for one meaning.
+  if (
+    is.list(hyperparameters) && !S7_inherits(hyperparameters, Hyperparameters)
+  ) {
+    hyperparameters <- as_HyperparametersSet(hyperparameters)
+  }
+  check_hyperparameters(hyperparameters)
+  # Kept as given, because `input_config` below records what was *asked for* and
+  # a set is a different ask from the configuration it collapses to. A list of
+  # one is a legitimate and useful input -- it is how a run names its
+  # configuration -- and that name is only in the recipe if the recipe holds the
+  # set.
+  asked_hyperparameters <- hyperparameters
+  algorithm <- hyperparameters@algorithm
+
+  # The run's input, captured before anything resolves it. Tuning narrows a
+  # search space and `train_()` fills in what the data decides, so by the time
+  # the model is built `hyperparameters` says what *ran*; only this says what
+  # was *asked for*. `record()` needs both to report where each value came from.
+  # Before the recipe is built: `SuperConfigPaths` types this block, so an S7 error
+  # would otherwise reach the caller in place of the message that names the fix.
+  if (!is.null(preprocessor_config)) {
+    check_preprocessor_for_train(preprocessor_config)
+  }
+
+  # `dat_training_path` stays unset for an in-memory run -- data identity is the
+  # provenance block's `DataFingerprint`, not a path.
+  input_config <- setup_SuperConfig(
+    # `SuperConfigPaths` is a portable recipe over a data *path*, so it names a
+    # weights column; `weights` here is the vector itself, which such a
+    # document cannot hold. The field is therefore left unset, and a weighted
+    # run is identifiable from its `DataFingerprint`.
+    weights = NULL,
+    # Relevelling the outcome is all `positive_class` does to the run, so
+    # nothing downstream would otherwise say it was asked for: two runs
+    # differing only in which class is positive would produce identical input
+    # blocks, and their metrics are not comparable without it.
+    positive_class = positive_class,
+    preprocessor_config = preprocessor_config,
+    decomposition_config = decomposition_config,
+    hyperparameters = asked_hyperparameters,
+    tuner_config = tuner_config,
+    outer_resampling_config = outer_resampling_config,
+    execution_config = execution_config,
+    question = question,
+    # Passed explicitly, so a record names the directory the run wrote to; the
+    # `SuperConfigPaths` default ("results/") does not apply, and a live run
+    # writes nothing to disk.
+    outdir = outdir,
+    # A nested call passes `verbosity - 1L`, so this can be negative -- an
+    # internal "quieter than silent" convention a config cannot express, its
+    # `verbosity` being bounded at 0. Clamped at 0: it affects messages, never
+    # results.
+    verbosity = max(0L, verbosity)
+  )
+
+  # A column named by `id_strat` identifies cases, so the learner must not see
+  # it: left in, it reaches the model as a
+  # high-cardinality feature, and `check_supervised()` rejects the run outright
+  # when the IDs are strings. Only `resample()` needs it, and only to read the
+  # grouping off, so the frame carrying it is kept for that one call.
+  x_resampling <- x
+  x <- drop_id_strat_column(x, outer_resampling_config)
 
   # Initial check targetting non-numeric or factor columns
   # Will be checked again by individual learners;
@@ -261,30 +475,6 @@ train <- function(
   type <- supervised_type(x)
   ncols <- ncol(x)
 
-  if (is.null(hyperparameters) && !is.null(algorithm)) {
-    hyperparameters <- get_default_hyperparameters(
-      algorithm,
-      type = type,
-      ncols = ncols
-    )
-  }
-
-  if (
-    !is.null(algorithm) &&
-      tolower(algorithm) != tolower(hyperparameters@algorithm)
-  ) {
-    rtemis.core::abort(
-      "You defined algorithm to be '",
-      algorithm,
-      "', but defined hyperparameters for ",
-      hyperparameters@algorithm,
-      ".",
-      class = c("rtemis_value_error", "rtemis_input_error")
-    )
-  }
-
-  check_is_S7(hyperparameters, Hyperparameters)
-
   # Set default tuner_config if tuning is needed but none specified
   if (needs_tuning(hyperparameters) && is.null(tuner_config)) {
     tuner_config <- setup_GridSearch()
@@ -294,33 +484,50 @@ train <- function(
     check_is_S7(tuner_config, TunerConfig)
   }
 
-  if (!is.null(preprocessor_config)) {
-    check_is_S7(preprocessor_config, PreprocessorConfig)
-  }
-
   # Can only use algorithms whose output can be applied on new data: we need to apply the
   # transformation learned on the training data to validation and test sets.
   if (!is.null(decomposition_config)) {
-    check_is_S7(decomposition_config, DecompositionConfig)
-    if (!decomposition_config@algorithm %in% decom_algorithms_applicable) {
-      rtemis.core::abort(
-        "Decomposition algorithm '",
-        decomposition_config@algorithm,
-        "' cannot be applied on new data and is not supported in `train()`.\n",
-        "Supported decomposition algorithms: ",
-        paste(decom_algorithms_applicable, collapse = ", "),
-        ".",
-        class = "rtemis_unsupported_error"
-      )
-    }
+    check_decom_applicable(decomposition_config)
   }
 
   # execution_config must always be set
   check_is_S7(execution_config, ExecutionConfig)
+
+  # Pre-flight ----
+  # Every config object is validated by now, so this is the first point the
+  # recipe and the data can be checked against each other -- and the last point
+  # before the run starts spending.
+  if (preflight) {
+    preflight_config(
+      x = x,
+      preprocessor_config = preprocessor_config,
+      decomposition_config = decomposition_config,
+      hyperparameters = hyperparameters,
+      tuner_config = tuner_config,
+      outer_resampling_config = outer_resampling_config,
+      positive_class = positive_class,
+      verbosity = verbosity
+    )
+  }
   # Override parallelization parameters with those from execution_config
   backend <- execution_config@backend
-  n_workers <- execution_config@n_workers
-  future_plan <- execution_config@future_plan
+  n_workers <- execution_n_workers(execution_config)
+  future_plan <- execution_future_plan(execution_config)
+
+  # A set with nothing to choose between is the configuration it holds, and from
+  # here on it is that configuration: only a one-member set of fixed values
+  # reaches this, since more than one member is a choice and so needs tuning.
+  # Collapsing means a set survives past this point only when tuning will
+  # resolve it, so nothing downstream has to know about sets. The name is
+  # carried onto the member, and the set itself is already recorded above.
+  if (
+    S7_inherits(hyperparameters, HyperparametersSet) &&
+      !needs_tuning(hyperparameters)
+  ) {
+    label <- names(hyperparameters@variants)[[1L]]
+    hyperparameters <- hyperparameters@variants[[1L]]
+    hyperparameters@variant <- label
+  }
 
   # If outer_resampling_config is set, dat_validation and dat_test must be NULL
   if (!is.null(outer_resampling_config)) {
@@ -332,17 +539,11 @@ train <- function(
     }
   }
 
-  if (backend == "future" && future_plan == "mirai_multisession") {
-    future_plan <- "future.mirai::mirai_multisession"
-  }
+  future_plan <- resolve_future_plan(backend, future_plan)
   if (!is.null(outer_resampling_config)) {
     check_is_S7(outer_resampling_config, ResamplerConfig)
-    if (!is.null(outer_resampling_config[["id_strat"]])) {
-      stopifnot(length(outer_resampling_config[["id_strat"]]) == NROW(x))
-    }
   }
 
-  algorithm <- get_alg_name(algorithm)
   if (!is.null(outdir)) {
     outdir <- make_path(outdir)
     if (!dir.exists(outdir)) {
@@ -371,12 +572,29 @@ train <- function(
   start_time <- intro(verbosity = verbosity, logfile = logfile)
 
   # Observability session ----
-  # The top-level call creates the ambient session; nested (per outer-fold) calls reuse
-  # it so their step nodes nest under the fold node. See specs/observability.md.
+  # A sequential outer fold reuses the ambient session, so its step nodes nest under the
+  # fold node. A fold dispatched in parallel runs with no session attached and creates one;
+  # that session is the sub-log the host grafts back under the fold node, which is what
+  # keeps the graph of a parallel run identical to a sequential one.
+  # See specs/observability.md sections 3 and 4.
   on_error <- execution_config@on_error
   session_created <- session_start(verbosity = verbosity)
   # Safety net: on any exit (incl. error) the top-level call clears the ambient slot.
   on.exit(if (session_created) session_clear(), add = TRUE)
+  # Because a fold in a daemon does create a session, `session_created` cannot answer
+  # "am I the run the user asked for?". The fold worker marks itself in `live[["fold"]]`,
+  # and everything that must happen exactly once per run keys off `is_root` instead.
+  is_root <- session_created && is.null(live[["fold"]])
+  # Data provenance ----
+  # Only the top-level call fingerprints: nested (per outer-fold) calls would
+  # each hash their own fold, which is both wasteful and not what anyone wants
+  # to compare. Same rule as the session above -- the top-level object carries
+  # the identity of the data the user actually supplied.
+  training_fingerprint <- if (is_root) {
+    data_fingerprint(x)
+  } else {
+    NULL
+  }
   root_node <- if (session_created) {
     node_enter("train", label = paste(algorithm, type))
   } else {
@@ -387,6 +605,14 @@ train <- function(
   if (type == "Classification") {
     classes <- levels(outcome(x))
   }
+
+  ## Validate hyperparameters against data ----
+  # Algorithm-specific constraints that depend on the data (e.g. Ranger's mtry
+  # cannot exceed the number of features). Runs before tuning and outer
+  # resampling, so an invalid search space fails here, before any grid cell
+  # runs; under `on_error = "continue"` per-cell failures would be skipped. Tunable
+  # hyperparameters still hold their full search space at this point.
+  validate_hyperparameters(hyperparameters, x)
 
   ## Print data summary ----
   if (verbosity > 0L) {
@@ -403,16 +629,65 @@ train <- function(
     hyperparameters = hyperparameters,
     outer_resampling_config = outer_resampling_config,
     n_workers = n_workers,
+    n_workers_outer = execution_dispatch_level(
+      execution_config,
+      "n_workers_outer"
+    ),
+    n_workers_tuning = execution_dispatch_level(
+      execution_config,
+      "n_workers_tuning"
+    ),
+    n_workers_algorithm = execution_config@n_workers_algorithm,
+    backend = execution_backend_label(execution_config),
+    device = describe_device(hyperparameters, execution_config@device),
     verbosity = verbosity
   )
   hyperparameters@n_workers <- workers[["algorithm"]]
   tuner <- NULL
 
-  # Set backend to "none" if workers[["tuning"]] == 1L
-  backend <- if (workers[["tuning"]] == 1L) {
+  # A separate name: the outer resampling loop further down needs the backend the user
+  # asked for, which `backend` keeps.
+  tuning_backend <- if (workers[["tuning"]] == 1L) {
     "none"
   } else {
     backend
+  }
+
+  # Worker pool ----
+  # Started once for the whole run, so every dispatch beneath this frame reuses the same
+  # workers. The level that will dispatch is whichever the ladder gave workers to, and
+  # only one ever does, so its share is the pool size; a run that spent them on the
+  # algorithm dispatches nothing and starts no pool.
+  # Sized here, once: tuning dispatches *inside* the outer fold loop, so a pool owned by
+  # each dispatch would be built and torn down once per fold, which on a short grid costs
+  # more than the parallelism saves.
+  # A sequential fold recurses into `train()` with the run's own config and reaches this
+  # again; `worker_pool_start()` finds the pool standing and hands back FALSE, so the fold
+  # uses the standing pool.
+  pool_started <- worker_pool_start(
+    backend = backend,
+    n_workers = max(workers[["tuning"]], workers[["outer_resampling"]]),
+    future_plan = future_plan,
+    warm = execution_warm_workers(execution_config),
+    envir = environment(),
+    verbosity = verbosity
+  )
+  on.exit(if (pool_started) worker_pool_stop(), add = TRUE)
+
+  # Reported here, once, and only by the run the user started: the individual
+  # `share_payload()` calls are silent, and there are two of them per dispatch site
+  # with tuning dispatching once per outer fold.
+  if (is_root) {
+    # One warning per run if a share fails; this is where a run begins.
+    live[["share_warned"]] <- NULL
+    report_shared_memory(
+      x,
+      mode = execution_config@shared_memory,
+      backend = backend,
+      future_plan = future_plan,
+      n_workers = max(workers[["tuning"]], workers[["outer_resampling"]]),
+      verbosity = verbosity
+    )
   }
 
   # Preprocessors ----
@@ -431,11 +706,15 @@ train <- function(
   # at predict() time. Stored on the returned model. NULL when no decomposition.
   decomposition <- NULL
 
-  # === Outer Resampling ===
+  # === Outer Resampling === ----
   # Splits data into multiple training-test folds and calls train() recursively
   # on each. Each recursive call enters the Single Model path below (which may
   # itself tune via inner resampling). After all folds complete, execution falls
   # through to the Outer Aggregation path.
+  # Folds run in parallel when the worker ladder assigned workers to this level,
+  # which happens only when there is neither a parallelized algorithm nor tuning
+  # to spend them on; otherwise the folds run one at a time and each spends the
+  # workers inside itself. spec: rtemis/parallelization.
   if (!is.null(outer_resampling_config)) {
     msg0(
       fmt("<> ", col = col_outer, bold = TRUE),
@@ -446,89 +725,139 @@ train <- function(
       "...",
       verbosity = verbosity
     )
+    # Each fold runs at `verbosity - 1L`, so the search's own announcement is
+    # silenced inside them. Say once, here, what all of them are about to do.
+    if (needs_tuning(hyperparameters) && !is.null(tuner_config)) {
+      tuning_intro(
+        tuning_grid_summary(hyperparameters, tuner_config),
+        algorithm,
+        tuner_config,
+        verbosity = verbosity
+      )
+    }
     outer_resampler <- resample(
-      x,
+      x_resampling,
       config = outer_resampling_config,
       verbosity = verbosity
     )
-    n_outer <- outer_resampler@config@n
-    # When a `progress` callback is supplied (typically by rtemis.server to
-    # forward fold boundaries over the wire), use a plain lapply and invoke
-    # it per fold; the interactive `cli_progress_along` UI is replaced.
-    # Otherwise, keep the existing terminal progress UI for interactive
-    # users.
-    iter <- if (is.function(progress)) {
-      seq_len(n_outer)
-    } else {
-      cli::cli_progress_along(
-        seq_len(n_outer),
-        name = "Training outer resamples...",
-        type = "tasks"
+    n_outer <- outer_resampler@config@n_resamples
+    outer_workers <- workers[["outer_resampling"]]
+    # `execution_config@backend`, not `tuning_backend`: the latter has already been
+    # narrowed to "none" for the very case that reaches outer parallelization.
+    parallel_folds <- outer_workers > 1L && execution_config@backend != "none"
+    # The ladder assigns the run's workers to exactly one level, and which one decides what
+    # a fold may claim. Folds got them: each fold is one of n_workers already running, so it
+    # must claim nothing, or the run oversubscribes n_workers x n_workers. Folds did not get
+    # them precisely because a level *inside* a fold did -- a parallelized algorithm, or
+    # tuning -- so the fold inherits the run's config and runs the ladder again over it,
+    # this time with no outer level to consider. Forcing the sequential config on both
+    # branches is what silently serialized every tuned or self-parallelizing run.
+    fold_execution_config <- if (parallel_folds) {
+      SerialExecutionConfig(
+        # Threads, not processes: the fold is already occupying one worker and must not
+        # dispatch, but a self-parallelizing algorithm still runs multi-threaded inside
+        # it. This is what makes `n_workers_outer = 4L, n_workers_algorithm = 2L` mean
+        # four folds of two threads rather than four folds of one.
+        n_workers_algorithm = execution_config@n_workers_algorithm,
+        device = execution_config@device,
+        on_error = on_error,
+        seed = execution_config@seed
       )
+    } else {
+      execution_config
     }
-    models <- lapply(
-      iter,
-      function(i) {
-        if (is.function(progress)) {
-          tryCatch(
-            progress(
-              stage = "outer_fold",
-              current = i,
-              total = n_outer,
-              message = paste0("Outer fold ", i, "/", n_outer)
-            ),
-            error = function(e) NULL
-          )
-        }
-        fold_node <- node_enter(
+    x_shared <- share_payload(
+      x,
+      mode = execution_config@shared_memory,
+      backend = execution_config@backend,
+      future_plan = future_plan,
+      n_workers = outer_workers
+    )
+    weights_shared <- share_payload(
+      weights,
+      mode = execution_config@shared_memory,
+      backend = execution_config@backend,
+      future_plan = future_plan,
+      n_workers = outer_workers
+    )
+    run_outer_fold <- make_outer_fold_runner(
+      x = x_shared,
+      n_outer = n_outer,
+      preprocessor_config = preprocessor_config,
+      decomposition_config = decomposition_config,
+      hyperparameters = hyperparameters,
+      tuner_config = tuner_config,
+      execution_config = fold_execution_config,
+      weights = weights_shared,
+      question = question,
+      # Failure policy (specs/observability.md section 7): under "stop"/"stop_outer" an
+      # outer fold failure is fatal, so the fold re-raises and the dispatcher stops the
+      # run.
+      fatal = !identical(on_error, "continue"),
+      parallel = parallel_folds,
+      verbosity = verbosity - 1L
+    )
+    # Each fold receives its own resample and no other.
+    folds <- lapply(seq_len(n_outer), function(i) {
+      list(fold = i, resample = outer_resampler@resamples[[i]])
+    })
+    fold_results <- progress_plapply(
+      folds,
+      run_outer_fold,
+      backend = if (parallel_folds) execution_config@backend else "none",
+      n_workers = outer_workers,
+      future_plan = future_plan,
+      # One independent RNG substream per fold, assigned by fold index, so a resampled run
+      # gives the same answer sequentially and in parallel, at any worker count.
+      seeds = rng_substreams(execution_config@seed, n_outer),
+      label = "Outer resamples",
+      kind = "outer_resampling",
+      stop_on_error = !identical(on_error, "continue"),
+      verbosity = verbosity
+    )
+    # Collect ----
+    # Folds never raise out of `progress_plapply()` under "continue", so the policy is
+    # applied here, on the host, where the session and the user's console are.
+    models <- vector("list", n_outer)
+    for (i in seq_len(n_outer)) {
+      res <- normalize_fold_result(fold_results[[i]])
+      # A fold dispatched in parallel ran with no session attached, so its `node_enter()`
+      # was inert and the host synthesizes the fold node now, grafting the sub-log the
+      # worker brought home beneath it. A sequential fold already recorded its own node
+      # and carries no session. See specs/observability.md section 4.
+      if (parallel_folds) {
+        fold_node <- session_add_node(
           "outer_fold",
           label = paste0(i, "/", n_outer),
-          meta = list(fold = i)
+          status = if (res[["failed"]]) "error" else "ok",
+          meta = list(fold = i, error = res[["error_message"]]),
+          t_start = res[["t_start"]],
+          t_end = res[["t_end"]]
         )
-        # Failure policy (specs/observability.md section 7): under "continue" an outer
-        # fold failure is non-fatal (recorded, warned, excluded); under "stop"/
-        # "stop_outer" it is recorded then re-raised.
-        out <- tryCatch(
-          train(
-            x = x[outer_resampler[[i]], ],
-            dat_test = x[-outer_resampler[[i]], ],
-            algorithm = algorithm,
-            preprocessor_config = preprocessor_config,
-            decomposition_config = decomposition_config,
-            hyperparameters = hyperparameters,
-            tuner_config = tuner_config,
-            outer_resampling_config = NULL, # This model is one of the outer resamples.
-            execution_config = execution_config,
-            weights = if (!is.null(weights)) {
-              weights[outer_resampler[[i]]]
-            } else {
-              NULL
-            },
-            question = question,
-            verbosity = verbosity - 1L
-          ),
-          error = function(e) {
-            node_exit(fold_node, status = "error", error = e)
-            if (identical(on_error, "continue")) {
-              rtemis.core::warn(
-                "Outer fold ",
-                i,
-                "/",
-                n_outer,
-                " failed: ",
-                conditionMessage(e)
-              )
-              return(NULL)
-            }
-            stop(e)
-          }
-        )
-        if (!is.null(out)) {
-          node_exit(fold_node, status = "ok")
+        if (!is.null(res[["model"]]) && !is.null(res[["model"]]@session)) {
+          session_graft(
+            res[["model"]]@session@events,
+            fold_node,
+            paste0("f", i)
+          )
+          # The events now live in the root session; leaving a copy on the sub-model would
+          # store the same graph twice on the returned object.
+          res[["model"]]@session <- NULL
         }
-        out
       }
-    )
+      if (res[["failed"]]) {
+        rtemis.core::warn(
+          "Outer fold ",
+          i,
+          "/",
+          n_outer,
+          " failed: ",
+          res[["error_message"]]
+        )
+      } else {
+        models[[i]] <- res[["model"]]
+      }
+    }
     names(models) <- names(outer_resampler@resamples)
     # Drop failed folds (only possible under on_error = "continue").
     failed_folds <- vapply(models, is.null, logical(1L))
@@ -560,7 +889,7 @@ train <- function(
   } # /Outer Resampling
 
   if (hyperparameters@resampled == 0L) {
-    # === Inner path ===
+    # === Inner path === ----
     # Trains one model: optionally tune (inner resampling) → preprocess →
     # train algorithm → predict → returns Supervised.
     # Skipped when outer resampling was performed (resampled == 1L).
@@ -578,45 +907,71 @@ train <- function(
         preprocessor_config = preprocessor_config,
         decomposition_config = decomposition_config,
         weights = weights,
-        backend = backend,
+        backend = tuning_backend,
         future_plan = future_plan,
         n_workers = workers[["tuning"]],
+        seed = execution_config@seed,
+        shared_memory = execution_config@shared_memory,
         verbosity = verbosity,
         on_error = on_error
       )
       # Update hyperparameters
+      # A set collapses here: from this point on `hyperparameters` is the one
+      # winning member, and every path below it is unchanged.
       hyperparameters <- update(
-        hyperparameters,
+        tuner@hyperparameters,
         tuner@best_hyperparameters,
         tuned = 1L
       )
+      # Which member won, so the fitted model reports it.
+      hyperparameters@variant <- tuner@best_variant
       node_exit(tune_node, status = "ok")
     } # /Tune
 
     # User-level preprocessing ----
+    # Features only, and no step that drops cases. The outcome is the quantity
+    # the model learns: scaling, one-hot encoding or imputing it would change
+    # what is being predicted and leave `predict()` returning values in
+    # transformed units, while a case-removing step cannot be replayed on new
+    # data at all. Same layout as the decomposition block below -- transform
+    # the features, re-attach the outcome last.
     if (!is.null(preprocessor_config)) {
       prep_node <- node_enter("preprocess")
       if (verbosity == 1L) {
         msg("Preprocessing...")
       }
+      prep_outcome_nm <- names(x)[ncols]
       preprocessor <- preprocess(
-        x = x,
+        x = as.data.frame(features(x)),
         config = preprocessor_config,
-        dat_validation = dat_validation,
-        dat_test = dat_test,
+        dat_validation = if (!is.null(dat_validation)) {
+          as.data.frame(features(dat_validation))
+        },
+        dat_test = if (!is.null(dat_test)) as.data.frame(features(dat_test)),
         verbosity = verbosity - 1L
       )
-      x <- if (is.null(dat_validation) && is.null(dat_test)) {
+      prep_training <- if (is.null(dat_validation) && is.null(dat_test)) {
         preprocessor@preprocessed
       } else {
         preprocessor@preprocessed[["training"]]
       }
+      x <- attach_outcome(prep_training, x[[ncols]], prep_outcome_nm)
       if (!is.null(dat_validation)) {
-        dat_validation <- preprocessor@preprocessed[["validation"]]
+        dat_validation <- attach_outcome(
+          preprocessor@preprocessed[["validation"]],
+          dat_validation[[NCOL(dat_validation)]],
+          prep_outcome_nm
+        )
       }
       if (!is.null(dat_test)) {
-        dat_test <- preprocessor@preprocessed[["test"]]
+        dat_test <- attach_outcome(
+          preprocessor@preprocessed[["test"]],
+          dat_test[[NCOL(dat_test)]],
+          prep_outcome_nm
+        )
       }
+      # Preprocessing may add columns (one-hot) or drop them (constants).
+      ncols <- ncol(x)
       node_exit(prep_node, status = "ok")
     } else {
       preprocessor <- NULL
@@ -637,48 +992,35 @@ train <- function(
       outcome_nm <- names(x)[ncols]
       feat <- as.data.frame(features(x))
       # Resolve the columns to decompose: NULL -> all numeric features.
-      decomp_features <- decomposition_config@features
-      if (is.null(decomp_features)) {
-        decomp_features <- names(numeric_features(x))
-      }
-      # Validate the selection against the actual (post-preprocessing) data.
-      missing_cols <- setdiff(decomp_features, names(feat))
-      if (length(missing_cols) > 0L) {
-        rtemis.core::abort(
-          "`decomposition_config` selects columns that are not features.\n",
-          "Not found among features: ",
-          paste(missing_cols, collapse = ", "),
-          ".",
-          class = c("rtemis_value_error", "rtemis_input_error")
-        )
-      }
-      non_numeric <- decomp_features[
-        !vapply(feat[decomp_features], is.numeric, logical(1L))
-      ]
-      if (length(non_numeric) > 0L) {
-        rtemis.core::abort(
-          "Decomposition can only be applied to numeric features.\n",
-          "Non-numeric columns selected: ",
-          paste(non_numeric, collapse = ", "),
-          ".",
-          class = c("rtemis_type_error", "rtemis_input_error")
-        )
-      }
-      if (length(decomp_features) < 2L) {
-        rtemis.core::abort(
-          "Decomposition requires at least 2 numeric feature columns.\n",
-          length(decomp_features),
-          " available to decompose.",
-          class = c("rtemis_length_error", "rtemis_input_error")
-        )
-      }
+      # Binds the *resolved* selection, which for an unset `features` is
+      # whatever the data happen to supply, so no declaration can express it.
+      # An explicit selection is validated by `decomp()` against `feat`.
+      decomp_features <- decomposition_config@features %||%
+        resolve_unsupervised_features(feat, "Decomposition")
       # Persist the resolved names so apply_decomp() replays the same selection
-      # on validation/test here and on new data at predict() time.
+      # on validation/test here and on new data at predict() time. `decomp()`
+      # subsets `feat` by them, so the fit and the replay cannot disagree.
       decomposition_config@features <- decomp_features
+      # The decomposition runs in this process before the learner. It may use
+      # every worker as threads only when this call dispatches nothing; when
+      # tuning or folds claim the workers it runs on one thread, so the two
+      # never oversubscribe. Seeded from this call's seed, which within a fold
+      # is the fold's substream.
+      decomposition_threads <- execution_config@n_workers_algorithm %||%
+        if (workers[["tuning"]] == 1L && workers[["outer_resampling"]] == 1L) {
+          n_workers
+        } else {
+          1L
+        }
+      decomposition_execution <- algorithm_execution_config(
+        execution_config,
+        decomposition_threads
+      )
       decomposition <- decomp(
-        x = feat[, decomp_features, drop = FALSE],
+        x = feat,
         algorithm = decomposition_config@algorithm,
         config = decomposition_config,
+        execution_config = decomposition_execution,
         verbosity = verbosity
       )
       # Columns not decomposed are kept as-is, in front of the components.
@@ -696,7 +1038,12 @@ train <- function(
       if (!is.null(dat_validation)) {
         val_outcome <- dat_validation[[ncols]]
         dat_validation <- as.data.frame(
-          apply_decomp(decomposition, features(dat_validation), verbosity = 0L)
+          apply_decomposition(
+            decomposition,
+            features(dat_validation),
+            execution_config = decomposition_execution,
+            verbosity = 0L
+          )
         )
         dat_validation[[outcome_nm]] <- val_outcome
       }
@@ -704,7 +1051,12 @@ train <- function(
       if (!is.null(dat_test)) {
         test_outcome <- dat_test[[ncols]]
         dat_test <- as.data.frame(
-          apply_decomp(decomposition, features(dat_test), verbosity = 0L)
+          apply_decomposition(
+            decomposition,
+            features(dat_test),
+            execution_config = decomposition_execution,
+            verbosity = 0L
+          )
         )
         dat_test[[outcome_nm]] <- test_outcome
       }
@@ -725,13 +1077,17 @@ train <- function(
         weights <- ifw(x[[ncols]], type = "case_weights", verbosity = verbosity)
       }
     } # /IFW
+    # Whatever produced them, the weights reach every algorithm from here, so
+    # their assumptions are checked here, once for every backend.
+    check_case_weights(weights, NROW(x))
 
     # Train algorithm ----
+    # The device is named once per run, in the resources line.
     if (is_tuned(hyperparameters)) {
-      msg(
-        "Training",
+      msg0(
+        "Training ",
         highlight(paste(algorithm, type)),
-        "with tuned hyperparameters...",
+        " with tuned hyperparameters...",
         verbosity = verbosity
       )
     } else {
@@ -750,6 +1106,10 @@ train <- function(
       NULL
     }
 
+    # Re-check now that hyperparameters are resolved and the feature count
+    # reflects preprocessing and decomposition.
+    validate_hyperparameters(hyperparameters, x)
+
     algo_node <- node_enter(
       "train_alg",
       label = algorithm,
@@ -766,6 +1126,13 @@ train <- function(
     node_exit(algo_node, status = "ok")
 
     model <- trained[["model"]]
+    # Values the algorithm resolved at train time (LightGBM's `objective` from
+    # the outcome type, GLMNET's `lambda`): R copied `hyperparameters` into
+    # `train_()`, so without this the fitted model would report NULL for
+    # settings it demonstrably used.
+    if (!is.null(trained[["hyperparameters"]])) {
+      hyperparameters <- trained[["hyperparameters"]]
+    }
     # Algorithm-level preprocessing (e.g. factor-to-integer for LightGBM),
     # returned by train_*() if needed.
     preprocessor_internal <- trained[["preprocessor"]]
@@ -777,22 +1144,31 @@ train <- function(
     # Re-apply algorithm-level preprocessing before predicting on each dataset.
     x_features <- features(x)
     if (!is.null(preprocessor_internal)) {
-      x_features <- preprocess(
-        x_features,
+      x_features <- apply_preprocessor(
         preprocessor_internal,
+        x_features,
         verbosity = verbosity - 1L
-      ) |>
-        preprocessed()
+      )
     }
 
+    # The fit's own predictions run in its process, on the algorithm workers the
+    # ladder gave it, never dispatching.
+    fit_execution <- algorithm_execution_config(
+      execution_config,
+      hyperparameters@n_workers
+    )
     predicted_training <- predict_super(
       model = model,
       newdata = x_features,
-      type = type
+      type = type,
+      execution_config = fit_execution
     )
 
     if (type == "Classification") {
-      predicted_prob_training <- predicted_training
+      # `predict_super()` returns probabilities for a classification model;
+      # normalized to a matrix so the property has one shape whatever the
+      # backend and the class count (see `prob_matrix()`).
+      predicted_prob_training <- prob_matrix(predicted_training, classes)
       predicted_training <- prob2categorical(
         predicted_prob_training,
         levels = classes
@@ -803,22 +1179,22 @@ train <- function(
     if (!is.null(dat_validation)) {
       dat_validation_features <- features(dat_validation)
       if (!is.null(preprocessor_internal)) {
-        dat_validation_features <- preprocess(
-          dat_validation_features,
+        dat_validation_features <- apply_preprocessor(
           preprocessor_internal,
+          dat_validation_features,
           verbosity = verbosity - 1L
-        ) |>
-          preprocessed()
+        )
       }
 
       predicted_validation <- predict_super(
         model = model,
         newdata = dat_validation_features,
-        type = type
+        type = type,
+        execution_config = fit_execution
       )
 
       if (type == "Classification") {
-        predicted_prob_validation <- predicted_validation
+        predicted_prob_validation <- prob_matrix(predicted_validation, classes)
         predicted_validation <- prob2categorical(
           predicted_prob_validation,
           levels = classes
@@ -829,22 +1205,22 @@ train <- function(
     if (!is.null(dat_test)) {
       dat_test_features <- features(dat_test)
       if (!is.null(preprocessor_internal)) {
-        dat_test_features <- preprocess(
-          dat_test_features,
+        dat_test_features <- apply_preprocessor(
           preprocessor_internal,
+          dat_test_features,
           verbosity = verbosity - 1L
-        ) |>
-          preprocessed()
+        )
       }
 
       predicted_test <- predict_super(
         model = model,
         newdata = dat_test_features,
-        type = type
+        type = type,
+        execution_config = fit_execution
       )
 
       if (type == "Classification") {
-        predicted_prob_test <- predicted_test
+        predicted_prob_test <- prob_matrix(predicted_test, classes)
         predicted_test <- prob2categorical(
           predicted_prob_test,
           levels = classes
@@ -852,21 +1228,6 @@ train <- function(
       }
     }
 
-    # Standard Errors ----
-    # Use the same (algorithm-level preprocessed) features as predictions.
-    se_training <- se_validation <- se_test <- NULL
-    if (type == "Regression" && algorithm %in% se_compat_algorithms) {
-      se_training <- se_super(model = model, newdata = x_features)
-      if (!is.null(dat_validation)) {
-        se_validation <- se_super(
-          model = model,
-          newdata = dat_validation_features
-        )
-      }
-      if (!is.null(dat_test)) {
-        se_test <- se_super(model = model, newdata = dat_test_features)
-      }
-    }
     node_exit(predict_node, status = "ok")
 
     # Variable importance ----
@@ -902,16 +1263,14 @@ train <- function(
       predicted_prob_training = predicted_prob_training,
       predicted_prob_validation = predicted_prob_validation,
       predicted_prob_test = predicted_prob_test,
-      se_training = se_training,
-      se_validation = se_validation,
-      se_test = se_test,
       xnames = names(x)[-ncols],
       varimp = varimp,
-      question = question
+      question = question,
+      data_fingerprint = training_fingerprint
     )
     node_exit(metrics_node, status = "ok")
   } else {
-    # === Outer Aggregation path ===
+    # === Outer Aggregation path === ----
     # Reached after outer resampling. Each sub-model (Supervised) in `models`
     # carries its own preprocessor pair. Aggregate results → SupervisedRes.
     y_training <- lapply(models, function(mod) mod@y_training)
@@ -949,14 +1308,23 @@ train <- function(
       predicted_prob_test = predicted_prob_test,
       xnames = names(x)[-ncols],
       varimp = lapply(models, \(mod) mod@varimp),
-      question = question
+      question = question,
+      data_fingerprint = training_fingerprint
     )
   }
 
+  # Attach the run's input ----
+  # Only the top-level call: a per-outer-fold sub-model shares the same input,
+  # and one record per `train()` call is the design (see config-artifacts.md).
+  if (is_root) {
+    mod@config <- input_config
+  }
+
   # Finalize observability session ----
-  # Only the top-level call finalizes and attaches the session; nested (per outer-fold)
-  # calls leave their sub-model's `session` NULL, as the root session already contains
-  # their nodes. See specs/observability.md sections 3 and 10.
+  # Keyed off `session_created`, not `is_root`: an in-process fold leaves its sub-model's
+  # `session` NULL because the root session already holds its nodes, while a fold in a
+  # daemon attaches the session it built, which is how those nodes travel home to be
+  # grafted. See specs/observability.md sections 3, 4, and 10.
   if (session_created) {
     node_exit(root_node, status = "ok")
     mod@session <- session_finalize()
@@ -968,11 +1336,26 @@ train <- function(
     print(mod)
     message()
   }
-  if (session_created && verbosity >= 2L) {
+  if (is_root && verbosity >= 2L) {
     session_report(mod@session, verbosity = verbosity)
   }
   if (!is.null(outdir)) {
     rt_save(mod, outdir = outdir, file_prefix = paste0("train_", algorithm))
+    # The record sits beside the model and shares its name, so a directory of
+    # runs pairs up by inspection. No opt-in: "all runs are auditable" does not
+    # hold if writing the record is something a caller can forget. Only a
+    # top-level call has the input a record needs.
+    # A resampled run records one entry per fold, so folds that resolved
+    # different values (early stopping settles on a different `nrounds` each
+    # time) are each stated.
+    if (is_root) {
+      write_record(
+        mod,
+        file.path(outdir, paste0("train_", algorithm, ".record.json")),
+        overwrite = TRUE,
+        verbosity = verbosity
+      )
+    }
   }
   outro(
     start_time,
@@ -993,6 +1376,187 @@ train <- function(
 } # /rtemis::train
 
 
+# %% make_outer_fold_runner ----
+#' Build the per-outer-fold body
+#'
+#' Returns the closure `progress_plapply()` dispatches once per outer resample. One body
+#' serves every backend, switching on `parallel`: under sequential dispatch it records its
+#' fold node in the ambient session and the nested `train()` nests beneath it; under
+#' parallel dispatch it detaches the ambient session, so `node_enter()` is inert and the
+#' nested `train()` builds the session that travels home as the fold's sub-log.
+#'
+#' @details
+#' Built by a factory because serializing a closure walks
+#' its enclosing environments: a body defined in `train()`'s frame would ship that entire
+#' frame to every worker -- every dataset, config and intermediate it happens to hold.
+#' This frame holds only what a fold actually needs.
+#'
+#' `live[["fold"]]` marks the call as a fold for the `train()` that runs inside it, which
+#' is how a fold in a daemon knows not to fingerprint its slice of the data, attach an
+#' input config, or report a graph of its own.
+#'
+#' The session is detached explicitly, because "dispatched
+#' in parallel" does not imply "no session here": a forked worker
+#' (`future_plan = "multicore"`) inherits the host's `live` env wholesale, and a
+#' `multicore` plan on a host where forking is unavailable runs the body in process. In
+#' both cases the fold would nest into the host's session, return no sub-log to graft, and
+#' -- in the second -- leave a fold node the host then duplicates when it synthesizes its
+#' own. Detaching makes every parallel worker build the per-fold session the host expects.
+#'
+#' Under a tolerant failure policy a failure is captured and returned, so the host can
+#' warn about it and aggregate over the folds that survived. Under a fatal one it is
+#' recorded on the fold node and then re-raised, which lets the dispatcher stop the run.
+#'
+#' @param x Tabular data: Full training set; each fold slices its own rows.
+#' @param n_outer Integer [1, Inf): Number of outer resamples.
+#' @param preprocessor_config Optional `SupervisedPreprocessorConfig` object.
+#' @param decomposition_config Optional `DecompositionConfig` object.
+#' @param hyperparameters `Hyperparameters` object.
+#' @param tuner_config Optional `TunerConfig` object.
+#' @param execution_config `ExecutionConfig` object: Config the nested `train()` runs under.
+#' Sequential when folds are dispatched in parallel; otherwise the run's own, so the fold
+#' can spend the workers on whichever inner level the ladder assigned them to.
+#' @param weights Optional vector of case weights.
+#' @param question Optional Character: The question the model answers.
+#' @param fatal Logical: If TRUE, a fold failure is re-raised rather than returned.
+#' @param parallel Logical: If TRUE, folds are dispatched in parallel and each fold builds
+#' its own session for the host to graft.
+#' @param verbosity Integer: Verbosity level.
+#'
+#' @return Function of `(task)`, where `task` is a list with the fold number `fold` and its
+#' training indices `resample`, returning a list with `model`, `failed`, `error`,
+#' `t_start`, `t_end`.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+make_outer_fold_runner <- function(
+  x,
+  n_outer,
+  preprocessor_config,
+  decomposition_config,
+  hyperparameters,
+  tuner_config,
+  execution_config,
+  weights,
+  question,
+  fatal,
+  parallel,
+  verbosity
+) {
+  force(x)
+  force(n_outer)
+  force(preprocessor_config)
+  force(decomposition_config)
+  force(hyperparameters)
+  force(tuner_config)
+  force(execution_config)
+  force(weights)
+  force(question)
+  force(fatal)
+  force(parallel)
+  force(verbosity)
+  function(task) {
+    i <- task[["fold"]]
+    res_i <- task[["resample"]]
+    if (parallel) {
+      saved_session <- live[["session"]]
+      live[["session"]] <- NULL
+      on.exit(live[["session"]] <- saved_session, add = TRUE)
+    }
+    live[["fold"]] <- i
+    on.exit(live[["fold"]] <- NULL, add = TRUE)
+    fold_node <- node_enter(
+      "outer_fold",
+      label = paste0(i, "/", n_outer),
+      meta = list(fold = i)
+    )
+    t_start <- Sys.time()
+    model <- tryCatch(
+      train(
+        x = x[res_i, ],
+        dat_test = x[-res_i, ],
+        preprocessor_config = preprocessor_config,
+        decomposition_config = decomposition_config,
+        hyperparameters = hyperparameters,
+        tuner_config = tuner_config,
+        outer_resampling_config = NULL, # This model is one of the outer resamples.
+        execution_config = execution_config,
+        weights = if (!is.null(weights)) weights[res_i] else NULL,
+        question = question,
+        verbosity = verbosity
+      ),
+      error = function(e) e
+    )
+    t_end <- Sys.time()
+    failed <- inherits(model, "condition")
+    node_exit(
+      fold_node,
+      status = if (failed) "error" else "ok",
+      error = if (failed) model else NULL
+    )
+    if (failed && fatal) {
+      rtemis.core::abort(
+        "Outer fold ",
+        i,
+        "/",
+        n_outer,
+        " failed: ",
+        conditionMessage(model),
+        class = c("rtemis_error", "rtemis_runtime_error")
+      )
+    }
+    list(
+      model = if (failed) NULL else model,
+      failed = failed,
+      error = if (failed) model else NULL,
+      t_start = t_start,
+      t_end = t_end
+    )
+  }
+} # /rtemis::make_outer_fold_runner
+
+
+# %% normalize_fold_result ----
+#' Normalize one outer fold result
+#'
+#' A fold body returns a structured result. A condition arrives instead only when the
+#' dispatch itself failed -- a task that could not be serialized, or a worker that died --
+#' which is outside the body's own `tryCatch`. Both shapes are flattened here so the
+#' collection loop has one thing to read.
+#'
+#' @param res List or condition: One element of the `progress_plapply()` result.
+#'
+#' @return List with `model`, `failed`, `error_message`, `t_start`, `t_end`.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+normalize_fold_result <- function(res) {
+  if (inherits(res, "condition")) {
+    now <- Sys.time()
+    return(list(
+      model = NULL,
+      failed = TRUE,
+      error_message = conditionMessage(res),
+      t_start = now,
+      t_end = now
+    ))
+  }
+  list(
+    model = res[["model"]],
+    failed = isTRUE(res[["failed"]]),
+    error_message = if (is.null(res[["error"]])) {
+      NULL
+    } else {
+      conditionMessage(res[["error"]])
+    },
+    t_start = res[["t_start"]],
+    t_end = res[["t_end"]]
+  )
+} # /rtemis::normalize_fold_result
+
+
 # %% get_n_workers ----
 # Function to assign number of workers to algorithm, tuning, or outer resampling
 # based on whether algorithm is parallelized, tuning is needed, and outer resampling is set.
@@ -1000,17 +1564,30 @@ train <- function(
 #' Get Number of Workers
 #'
 #' Distribute workers across different parallelization levels: algorithm training,
-#' tuning (inner resampling), and outer resampling. Assigns workers to the innermost
-#' available parallelization level to avoid over-subscription.
+#' tuning (hyperparameter combinations x inner resamples), and outer resampling. Assigns workers
+#' to the innermost available parallelization level to avoid over-subscription.
 #'
 #' @param algorithm Character: Algorithm name.
 #' @param hyperparameters `Hyperparameters` object: Setup using one of `setup_*` functions.
-#' @param outer_resampling_config Optional ResamplerConfig object: Setup using [setup_Resampler].
+#' @param outer_resampling_config Optional ResamplerConfig object: Setup using
+#' one of the `setup_*` resampler functions, e.g. [setup_KFold].
 #' @param n_workers Integer: Total number of workers you want to use.
+#' @param n_workers_outer Optional Integer: Workers for outer resampling, named by the
+#' caller. Any named level switches off the priority assignment described below.
+#' @param n_workers_tuning Optional Integer: Workers for tuning, named by the caller.
+#' @param n_workers_algorithm Optional Integer: Threads for a self-parallelizing
+#' algorithm, named by the caller.
+#' @param backend Character: Execution backend label for the resources line.
+#' @param device Character: Compute device label for the resources line, from
+#' `describe_device()`.
 #' @param verbosity Integer: Verbosity level.
 #'
 #' @details
-#' The function prioritizes parallelization levels as follows:
+#' Prints one line stating every resource the run may use: the compute device,
+#' the backend, the worker ceiling and each level's share, and whether the
+#' shares were set by the caller.
+#'
+#' With no level named, the function prioritizes parallelization levels as follows:
 #' 1. If algorithm is parallelized (e.g., LightGBM, Ranger): all workers go to algorithm
 #' 2. Else if tuning is needed: all workers go to tuning (inner resampling)
 #' 3. Else if outer resampling is set: all workers go to outer resampling
@@ -1019,7 +1596,7 @@ train <- function(
 #' @return Named list with the number of workers for each level:
 #' - `algorithm`: Number of workers for algorithm training.
 #' - `tuning`: Number of workers for tuning (if applicable).
-#' - `outer_resampling_config`: Number of workers for outer resampling (if applicable).
+#' - `outer_resampling`: Number of workers for outer resampling (if applicable).
 #'
 #' @keywords internal
 #' @noRd
@@ -1028,6 +1605,11 @@ get_n_workers <- function(
   hyperparameters,
   outer_resampling_config,
   n_workers,
+  n_workers_outer = NULL,
+  n_workers_tuning = NULL,
+  n_workers_algorithm = NULL,
+  backend = "serial",
+  device = "CPU",
   verbosity = 1L
 ) {
   # Input validation
@@ -1043,6 +1625,57 @@ get_n_workers <- function(
   is_parallelized <- algorithm %in% live[["parallelized_learners"]]
   requires_tuning <- needs_tuning(hyperparameters)
   requires_resampling <- !is.null(outer_resampling_config)
+
+  # Named levels ----
+  # Any override switches the ladder off for every level, so the assignment is either
+  # entirely the caller's or entirely inferred, never half of each. A level that cannot
+  # run -- tuning with nothing to tune, folds with no outer resampler, threads for an
+  # algorithm that has none -- is clamped to 1 and said so: the config outlives any one
+  # run, and the same one is reasonably pointed at data that does and does not tune.
+  named <- list(
+    algorithm = n_workers_algorithm,
+    tuning = n_workers_tuning,
+    outer_resampling = n_workers_outer
+  )
+  if (!all(vapply(named, is.null, logical(1L)))) {
+    applies <- c(
+      algorithm = is_parallelized,
+      tuning = requires_tuning,
+      outer_resampling = requires_resampling
+    )
+    out <- lapply(names(named), function(level) {
+      asked <- named[[level]] %||% 1L
+      if (asked > 1L && !applies[[level]]) {
+        msg0(
+          "Ignoring n_workers_",
+          if (level == "outer_resampling") "outer" else level,
+          " = ",
+          asked,
+          ": this run has no ",
+          switch(
+            level,
+            algorithm = "self-parallelizing algorithm",
+            tuning = "hyperparameters to tune",
+            outer_resampling = "outer resampling"
+          ),
+          ".",
+          verbosity = verbosity
+        )
+        return(1L)
+      }
+      asked
+    })
+    names(out) <- names(named)
+    msg_resources(
+      backend = backend,
+      n_workers = n_workers,
+      workers = out,
+      explicit = TRUE,
+      device = device,
+      verbosity = verbosity
+    )
+    return(out)
+  }
 
   # Assign workers to innermost parallelization level to avoid over-subscription
   if (is_parallelized) {
@@ -1079,24 +1712,162 @@ get_n_workers <- function(
     workers_outer_resampling <- 1L
   }
 
-  msg0(
-    bold("//"),
-    " Max workers: ",
-    highlight(n_workers),
-    " { ",
-    gray("Algorithm: "),
-    highlight(workers_algorithm),
-    gray("; Tuning: "),
-    highlight(workers_tuning),
-    gray("; Outer Resampling: "),
-    highlight(workers_outer_resampling),
-    " }",
-    verbosity = verbosity
-  )
-
-  list(
+  out <- list(
     algorithm = workers_algorithm,
     tuning = workers_tuning,
     outer_resampling = workers_outer_resampling
   )
+  msg_resources(
+    backend = backend,
+    n_workers = n_workers,
+    workers = out,
+    explicit = FALSE,
+    device = device,
+    verbosity = verbosity
+  )
+  out
 } # /rtemis::get_n_workers
+
+
+# %% msg_resources ----
+#' Print the resources a run may use, on one line
+#'
+#' Device first, since it is what changes most between machines, then the
+#' backend, then the worker ceiling and each level's share:
+#'
+#' `// MPS (auto-selected) | mirai | 2 workers: algorithm 2 threads, tuning 1, outer resampling 1`
+#'
+#' The algorithm's share is threads inside one worker, so it can exceed the
+#' worker ceiling under serial execution. `(as set)` marks shares the caller
+#' named; otherwise the worker ladder assigned them.
+#'
+#' @param backend Character: Execution backend label.
+#' @param n_workers Integer: Worker ceiling.
+#' @param workers Named list: `algorithm`, and `tuning` and `outer_resampling`
+#' for a workflow that has those levels; a level absent from the list is not
+#' printed.
+#' @param explicit Logical: Whether the caller named the shares.
+#' @param device Character: Compute device label.
+#' @param verbosity Integer: Verbosity level.
+#'
+#' @return NULL, invisibly.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+msg_resources <- function(
+  backend,
+  n_workers,
+  workers,
+  explicit,
+  device = "CPU",
+  verbosity = 1L
+) {
+  sep <- gray(" | ")
+  msg0(
+    bold("//"),
+    " ",
+    highlight(device),
+    sep,
+    highlight(backend),
+    sep,
+    highlight(n_workers),
+    ngettext(n_workers, " worker: ", " workers: "),
+    "algorithm ",
+    highlight(workers[["algorithm"]]),
+    ngettext(workers[["algorithm"]], " thread", " threads"),
+    if (!is.null(workers[["tuning"]])) {
+      paste0(", tuning ", highlight(workers[["tuning"]]))
+    },
+    if (!is.null(workers[["outer_resampling"]])) {
+      paste0(", outer resampling ", highlight(workers[["outer_resampling"]]))
+    },
+    if (explicit) gray(" (as set)"),
+    verbosity = verbosity
+  )
+  invisible(NULL)
+} # /rtemis::msg_resources
+
+
+# %% describe_device ----
+#' The compute device label for the resources line
+#'
+#' The device the algorithm will train on, from the execution config's request.
+#' See `device_label()` for the notes it carries.
+#'
+#' @param hyperparameters `Hyperparameters` or `HyperparametersSet` object.
+#' @param requested Optional `DeviceConfig` object: The execution config's
+#' device.
+#'
+#' @return Character, e.g. `"CPU"`, `"CUDA:1"` or `"MPS"`.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+describe_device <- function(hyperparameters, requested = NULL) {
+  # A set is one algorithm under several configurations; the label lists each
+  # member's device once.
+  if (S7_inherits(hyperparameters, HyperparametersSet)) {
+    return(paste(
+      unique(vapply(
+        hyperparameters@variants,
+        describe_device,
+        character(1L),
+        requested = requested
+      )),
+      collapse = ", "
+    ))
+  }
+  device <- training_device(hyperparameters, requested)
+  device_label(
+    device %||% "cpu",
+    requested = requested,
+    algorithm = hyperparameters@algorithm,
+    chooses = !is.null(device)
+  )
+} # /rtemis::describe_device
+
+
+# %% device_label ----
+#' Label a resolved device for the resources line
+#'
+#' Only the device in use is named. `(auto-selected)` marks a device the
+#' algorithm chose because none was requested; a request the algorithm cannot
+#' honor is named beside the CPU it runs on instead, so the line never implies a
+#' device the run did not use.
+#'
+#' @param device Character: Resolved device type.
+#' @param requested Optional `DeviceConfig` object.
+#' @param algorithm Character: Algorithm name.
+#' @param chooses Logical: Whether the algorithm selects a device itself when
+#' none is requested; an algorithm that only runs on the CPU does not.
+#'
+#' @return Character.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+device_label <- function(device, requested, algorithm, chooses) {
+  label <- toupper(device)
+  if (
+    identical(device, "cuda") &&
+      S7_inherits(requested, CUDADeviceConfig) &&
+      !is.null(requested@ids)
+  ) {
+    label <- paste0(label, ":", requested@ids[[1L]])
+  }
+  if (is.null(requested)) {
+    return(paste0(label, if (chooses) " (auto-selected)"))
+  }
+  if (!identical(requested@type, device)) {
+    return(paste0(
+      label,
+      " (",
+      toupper(requested@type),
+      " requested; ",
+      algorithm,
+      " cannot use it)"
+    ))
+  }
+  label
+} # /rtemis::device_label

@@ -14,7 +14,7 @@
 #' - **Delimited** files using `data.table:fread()`, `arrow:read_delim_arrow()`,
 #'   `vroom::vroom()`, or `duckdb::duckdb_read_csv()`
 #' - **ARFF** files using `farff::readARFF()`
-#' - **Parquet** files using `arrow::read_parquet()` or `nanoparquet::read_parquet`
+#' - **Parquet** files using `nanoparquet::read_parquet` or `arrow::read_parquet()`
 #' - **XLSX** files using `readxl::read_excel()`
 #' - **DTA** files from Stata using `haven::read_dta()`
 #' - **FASTA** files using `seqinr::read.fasta()`
@@ -23,7 +23,7 @@
 #' @param filename Character: filename or full path if `datadir = NULL`.
 #' @param datadir Character: Optional path to directory where `filename`
 #' is located. If not specified, `filename` must be the full path.
-#' @param make_unique Logical: If TRUE, keep unique rows only.
+#' @param remove_duplicates Logical: If TRUE, keep unique rows only.
 #' @param character2factor Logical: If TRUE, convert character variables to
 #' factors.
 #' @param clean_colnames Logical: If TRUE, clean columns names using
@@ -52,7 +52,6 @@
 #'
 #' @author EDG
 #' @export
-#'
 #' @examples
 #' \dontrun{
 #' # Replace with your own data directory and filename
@@ -62,11 +61,11 @@
 read <- function(
   filename,
   datadir = NULL,
-  make_unique = FALSE,
+  remove_duplicates = FALSE,
   character2factor = FALSE,
   clean_colnames = TRUE,
   delim_reader = c("data.table", "vroom", "duckdb", "arrow"),
-  parquet_reader = c("arrow", "nanoparquet"),
+  parquet_reader = c("nanoparquet", "arrow"),
   xlsx_sheet = 1,
   sep = NULL,
   quote = "\"",
@@ -122,7 +121,9 @@ read <- function(
     )
     .dat <- switch(
       parquet_reader,
-      "arrow" = arrow::read_parquet(path, ...),
+      "arrow" = as.data.frame(materialize_arrow_views(
+        arrow::read_parquet(path, as_data_frame = FALSE, ...)
+      )),
       "nanoparquet" = nanoparquet::read_parquet(path, ...)
     )
   } else if (ext == "rds") {
@@ -267,38 +268,19 @@ read <- function(
     highlightbig(.ncol),
     verbosity = verbosity
   )
-  if (make_unique) {
-    .dat <- unique(.dat)
-    .nrowp <- nrow(.dat)
-    .dup <- .nrow - .nrowp
-    if (verbosity > 0L && .dup > 0) {
-      msg(
-        "Removed",
-        fmt(
-          format(.dup, big.mark = ","),
-          col = rtemis_colors[["orange"]],
-          bold = TRUE
-        ),
-        "duplicate",
-        paste0(ngettext(.dup, "row", "rows"), ".")
-      )
-      msg(
-        "New dimensions:",
-        highlightbig(.nrowp),
-        "x",
-        highlightbig(.ncol)
-      )
-    }
-  }
 
   if (clean_colnames) {
     setnames(.dat, names(.dat), clean_colnames(.dat))
   }
 
-  if (character2factor) {
+  if (remove_duplicates || character2factor) {
     .dat <- preprocess(
       .dat,
-      setup_Preprocessor(character2factor = TRUE)
+      setup_Preprocessor(
+        character2factor = character2factor,
+        remove_duplicates = remove_duplicates
+      ),
+      verbosity = verbosity
     )[["preprocessed"]]
   }
 
@@ -318,7 +300,9 @@ read <- function(
   } else if (output == "tibble") {
     .dat <- tibble::as_tibble(.dat)
   } else if (output == "data.frame") {
-    if (!is.data.frame(.dat)) {
+    # nanoparquet returns a frame classed "tbl" "data.frame", which
+    # tibble::is_tibble() reports FALSE for, so the class is tested directly.
+    if (!is.data.frame(.dat) || inherits(.dat, "tbl")) {
       .dat <- as.data.frame(.dat)
     } else {
       setDF(.dat)
@@ -327,3 +311,63 @@ read <- function(
 
   .dat
 } # /rtemis::read
+
+
+# %% materialize_arrow_views ----
+#' Cast an Arrow table's view types to their materialized equivalents
+#'
+#' `arrow` has no R converter for the Arrow view types, so a Table carrying one
+#' reads fine and then fails to convert with
+#' `cannot handle Array of type <utf8_view>`. Polars writes every string column
+#' as `string_view` and its parquet writer fixes the compatibility level, so a
+#' polars-written file cannot avoid them and the cast has to happen here.
+#'
+#' Only top-level fields are cast: a view type nested inside a list or struct
+#' column is left as it is, since such a column is not the tabular data `read()`
+#' returns.
+#'
+#' @param x Arrow Table.
+#'
+#' @return `x` with each `string_view` field cast to `utf8` and each
+#' `binary_view` field to `binary`, returned unchanged when it carries neither.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+materialize_arrow_views <- function(x) {
+  # Two accessors, because arrow overloads `[[` and this package overloads `$`.
+  # `[[` reads an arrow object's *contents* where arrow defines it to -- a
+  # Table's column, a Schema's field -- and is plain environment access
+  # elsewhere, so it serves on a Field or a DataType but cannot reach a Table's
+  # schema or a Schema's metadata. `$` would, but the package's own `$` methods
+  # make it a closure, under which static analysis reads every member name as an
+  # unbound global: an `R CMD check` NOTE. Both are active bindings on an R6
+  # object, which is an environment, so `get()` reaches them. `$<-` and
+  # `as_arrow_table(schema = )` are clear of all this.
+  schema <- get("schema", envir = x)
+  fields <- lapply(seq_along(schema), function(i) schema[[i]])
+  materialized <- list(
+    string_view = arrow::utf8(),
+    binary_view = arrow::binary()
+  )
+  targets <- lapply(fields, function(field) {
+    materialized[[field[["type"]][["ToString"]]()]]
+  })
+  is_view <- !vapply(targets, is.null, logical(1L))
+  if (!any(is_view)) {
+    return(x)
+  }
+  fields[is_view] <- lapply(which(is_view), function(i) {
+    arrow::field(
+      fields[[i]][["name"]],
+      targets[[i]],
+      nullable = fields[[i]][["nullable"]]
+    )
+  })
+  target_schema <- do.call(arrow::schema, fields)
+  # The cast reaches the data through a schema built from scratch, which carries
+  # no key-value metadata; converting to a data.frame reads the "r" entry to
+  # restore R attributes, so the file's metadata has to be carried across.
+  assign("metadata", get("metadata", envir = schema), envir = target_schema)
+  arrow::as_arrow_table(x, schema = target_schema)
+} # /rtemis::materialize_arrow_views

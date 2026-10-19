@@ -1,0 +1,494 @@
+# 110_Tuner.R
+# ::rtemis::
+# 2025- EDG rtemis.org
+
+# References
+# S7
+# https://github.com/RConsortium/S7/
+# https://rconsortium.github.io/S7
+# future
+# https://www.futureverse.org/backends.html
+
+# Description
+# `TunerConfig` class and subclasses create objects that store tuner config.
+# They are set by `setup_GridSearch()` and perform type checking and validation.
+# They are used by `tune()`.
+# `Tuner` class and subclasses create objects that store tuning results.
+# They are created by `tune()`.
+
+# Dev
+# Should both class constructors (e.g. GridSearch@constructor) and setup functions
+# (e.g. setup_GridSearch) perform type checking and validation?
+
+# %% TunerConfig ----
+#' TunerConfig
+#'
+#' Superclass for tuner config.
+#'
+#' @field type Character: Type of tuner.
+#' @field config Named list of tuner config.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+TunerConfig <- schema_class(
+  name = "TunerConfig",
+  package = "rtemis",
+  abstract = TRUE,
+  properties = list(
+    type = class_character,
+    config = new_property(
+      class_list,
+      getter = function(self) {
+        own_prop_values(self, TunerConfig)
+      },
+      setter = function(self, value) {
+        route_config_assignment(self, TunerConfig, value)
+      }
+    )
+  ),
+  publication = SchemaPublication(
+    role = "family",
+    slug = "tuner",
+    title = "rtemis TunerConfig",
+    description = "Language-independent config for rtemis hyperparameter tuning. Mirrors the `TunerConfig` object: a tuner type and its settings.",
+    discriminator = "type",
+    discriminator_description = "Tuner type.",
+    order = 6L
+  )
+) # /rtemis::TunerConfig
+
+
+# %% serializable_props.TunerConfig ----
+# `type` plus the tuner's settings as siblings -- the shape the tuner schema
+# declares. The computed `config` list is not written: it is a view of the same
+# properties.
+method(serializable_props, TunerConfig) <- function(x) {
+  dispatched_props(x, TunerConfig, "type")
+} # /rtemis::serializable_props.TunerConfig
+
+
+# %% repr.TunerConfig ----
+method(repr, TunerConfig) <- function(
+  x,
+  pad = 0L,
+  output_type = NULL
+) {
+  paste0(
+    repr_S7name(
+      paste(x@type, "TunerConfig"),
+      pad = pad,
+      output_type = output_type
+    ),
+    repr_ls(x@config, pad = pad, output_type = output_type)
+  )
+} # /rtemis::repr.TunerConfig
+
+
+# %% print.TunerConfig ----
+method(print, TunerConfig) <- function(x, pad = 0L, ...) {
+  cat(repr(x, pad = pad), "\n")
+  invisible(x)
+}
+
+# %% desc.TunerConfig ----
+method(desc, TunerConfig) <- function(x) {
+  if (x@type == "GridSearch") {
+    paste(x@config[["search_type"]], "grid search")
+  }
+}
+
+
+# %% `$`.TunerConfig ----
+# Make TunerConfig@config `$`-accessible
+method(`$`, TunerConfig) <- function(x, name) {
+  x@config[[name]]
+}
+
+
+# %% `.DollarNames`.TunerConfig ----
+# `$`-autocomplete TunerConfig@config
+method(`.DollarNames`, TunerConfig) <- function(x, pattern = "") {
+  all_names <- names(x@config)
+  grep(pattern, all_names, value = TRUE)
+}
+
+
+# %% `[[`.TunerConfig ----
+# Make TunerConfig@config `[[`-accessible
+method(`[[`, TunerConfig) <- function(x, name) {
+  x@config[[name]]
+}
+
+
+# %% GridSearchConfig ----
+#' GridSearchConfig
+#'
+#' @description
+#' TunerConfig subclass for grid search config.
+#'
+#' @author EDG
+#' @noRd
+GridSearchConfig <- schema_class(
+  name = "GridSearchConfig",
+  parent = TunerConfig,
+  package = "rtemis",
+  defaults = list(
+    resampler_config = DefaultPolicy(
+      kind = "literal",
+      value = setup_KFold(n_resamples = 5L)
+    )
+  ),
+  properties = list(
+    type = prop_algorithm("GridSearch"),
+    # Nested config object; serialized/validated as a ResamplerConfig, so it
+    # is a plain property (excluded from generated schemas, where it is a
+    # `$ref` to the resampler schema).
+    resampler_config = prop_object(
+      ResamplerConfig,
+      nullable = TRUE,
+      description = "Resampling configuration for evaluating hyperparameter combinations."
+    ),
+    search_type = prop_string(
+      "exhaustive",
+      enum = c("exhaustive", "randomized"),
+      description = "Grid search strategy."
+    ),
+    randomize_p = prop_float(
+      NULL,
+      exclusive_min = 0,
+      exclusive_max = 1,
+      nullable = TRUE,
+      description = "Fraction of combinations to test when search_type is 'randomized'."
+    ),
+    metrics_aggregate_fn = prop_string(
+      "mean",
+      description = "Name of the function used to aggregate metrics across resamples."
+    ),
+    metric = prop_string(
+      NULL,
+      nullable = TRUE,
+      description = "Metric to minimize or maximize. Unset sets it from the outcome type."
+    ),
+    maximize = prop_boolean(
+      NULL,
+      nullable = TRUE,
+      description = "Maximize `metric` (otherwise minimize). Unset sets it from the metric."
+    )
+  ),
+  rules = list(PresenceRule(
+    id = "gridsearch.sampling-fraction",
+    property = "randomize_p",
+    when = SchemaPredicate(property = "search_type", equals = "randomized"),
+    forbid_otherwise = TRUE,
+    message = "randomize_p must be set exactly when search_type is randomized."
+  )),
+  publication = SchemaPublication(
+    role = "leaf",
+    description = "Grid search over hyperparameter combinations.",
+    order = 1L
+  )
+) # /rtemis::GridSearchConfig
+
+
+# %% setup_GridSearch ----
+#' Setup Grid Search Config
+#'
+#' Create a `GridSearchConfig` object that can be passed to [train].
+#'
+#' @param resampler_config Optional `ResamplerConfig`: Resampling configuration
+#' from a `setup_*` resampler function, e.g. [setup_KFold].
+#' @param search_type Character \{"exhaustive", "randomized"\}: Type of
+#' grid search to use. Exhaustive search will try all combinations of
+#' config. Randomized will try a random sample of size
+#' `randomize_p` * `N of total combinations`
+#' @param randomize_p Optional Numeric (0, 1): Randomly test this proportion of
+#' combinations. Required when `search_type` is `"randomized"`; must be left
+#' `NULL` when it is `"exhaustive"`.
+#' @param metrics_aggregate_fn Character: Name of function to use to aggregate error metrics.
+#' @param metric Optional Character: Metric to minimize or maximize. NULL sets
+#' it from the outcome type.
+#' @param maximize Optional Logical: If TRUE, maximize `metric`, otherwise
+#' minimize it. NULL maximizes `accuracy`, `balanced_accuracy`, `sensitivity`,
+#' `specificity`, `ppv`, `npv`, `f1`, `auc`, `rsq` and `Concordance`, and
+#' minimizes every other metric, including `mae`, `mse`, `rmse` and
+#' `brier_score`.
+#'
+#' @return A `GridSearchConfig` object.
+#'
+#' @author EDG
+#' @export
+#' @examples
+#' gridsearch_config <- setup_GridSearch(
+#'   resampler_config = setup_KFold(n_resamples = 5L),
+#'   search_type = "exhaustive"
+#' )
+#' gridsearch_config
+setup_GridSearch <- function(
+  resampler_config = setup_KFold(n_resamples = 5L),
+  search_type = "exhaustive",
+  randomize_p = NULL,
+  metrics_aggregate_fn = "mean",
+  metric = NULL,
+  maximize = NULL
+) {
+  apply_setup_defaults(GridSearchConfig)
+  # Arguments ----
+  # Per-field validation and the exhaustive/randomize_p rule are enforced by
+  # the property specs and the `GridSearchConfig` validator.
+  check_is_S7(resampler_config, ResamplerConfig)
+  GridSearchConfig(
+    resampler_config = resampler_config,
+    search_type = search_type,
+    randomize_p = randomize_p,
+    metrics_aggregate_fn = metrics_aggregate_fn,
+    metric = metric,
+    maximize = maximize
+  )
+} # /rtemis::setup_GridSearch
+
+
+# %% Tuner ----
+#' Tuner Class
+#'
+#' @field type Character: Type of tuner.
+#' @field hyperparameters Named list of tunable and fixed hyperparameters.
+#' @field tuning_results Data.frame: Tuning results.
+#' @field best_variant Optional Character: Name of the `HyperparametersSet`
+#'   member the winning combination came from. NULL for a single-object search.
+#' @field best_hyperparameters Named list of best hyperparameter values. Includes only
+#' hyperparameters that were tuned.
+#' @field searched_set Optional `HyperparametersSet`: The set searched over.
+#'   NULL for a single-object search.
+#'
+#' `hyperparameters` holds the **winning** configuration, which for a search
+#' over a `HyperparametersSet` is the member that won rather than the set. A
+#' union typed `Hyperparameters | HyperparametersSet` would take its prototype
+#' from an abstract class, which is the hazard the union-order rule exists for;
+#' `best_variant` carries the member's name instead.
+#'
+#' @author EDG
+#' @noRd
+Tuner <- new_class(
+  name = "Tuner",
+  package = "rtemis",
+  properties = list(
+    type = class_character,
+    hyperparameters = Hyperparameters,
+    tuner_config = TunerConfig,
+    tuning_results = class_list, # with 2 elements: metrics_training, metrics_validation
+    best_hyperparameters = class_list,
+    # Which member of a `HyperparametersSet` the winning combination came from,
+    # or NULL when the search was over a single object. Kept beside
+    # `best_hyperparameters`: that list holds hyperparameter values, and
+    # `.update_hyperparameters()` rejects any name that is not a settable
+    # hyperparameter.
+    best_variant = NULL | class_character,
+    searched_set = NULL | HyperparametersSet
+  )
+) # /rtemis::Tuner
+
+
+# %% desc.Tuner ----
+method(desc, Tuner) <- function(x) {
+  if (x@type == "GridSearch") {
+    paste(x@tuner_config[["search_type"]], "grid search")
+  }
+} # /rtemis::describe.Tuner
+
+
+# %% `$`.Tuner ----
+method(`$`, Tuner) <- function(x, name) {
+  prop_by_name(x, name)
+}
+
+
+# %% `.DollarNames`.Tuner ----
+method(`.DollarNames`, Tuner) <- function(x, pattern = "") {
+  prop_names_matching(x, pattern)
+}
+
+
+# %% `[[`.Tuner ----
+method(`[[`, Tuner) <- function(x, name) {
+  prop_by_name(x, name)
+}
+
+
+# %% GridSearch ----
+#' GridSearch Class
+#'
+#' Tuner subclass for grid search.
+#'
+#' @author EDG
+#' @noRd
+GridSearch <- new_class(
+  name = "GridSearch",
+  parent = Tuner,
+  package = "rtemis",
+  constructor = function(
+    hyperparameters,
+    tuner_config,
+    tuning_results,
+    best_hyperparameters,
+    best_variant = NULL,
+    searched_set = NULL
+  ) {
+    type <- "GridSearch"
+    new_object(
+      Tuner(
+        type = type,
+        hyperparameters = hyperparameters,
+        tuner_config = tuner_config,
+        tuning_results = tuning_results,
+        best_hyperparameters = best_hyperparameters,
+        best_variant = best_variant,
+        searched_set = searched_set
+      )
+    )
+  }
+) # /rtemis::GridSearch
+
+
+# print.GridSearch ----
+#' Print GridSearch
+#'
+#' Print GridSearch object
+#'
+#' @param x GridSearch object.
+#' @param header Logical: If TRUE, print header with type of tuner.
+#' @param ... Not used.
+#'
+#' @author EDG
+#' @noRd
+method(print, GridSearch) <- function(x, header = TRUE, ...) {
+  if (header) {
+    objcat(paste(x@type))
+  }
+  type <- if (x@tuner_config[["search_type"]] == "exhaustive") {
+    "An exhaustive grid search"
+  } else {
+    paste0(
+      "A randomized grid search (p = ",
+      x@tuner_config[["randomize_p"]],
+      ")"
+    )
+  }
+  n_param_combs <- NROW(x@tuning_results[["param_grid"]])
+  cat(
+    type,
+    " of ",
+    singorplu(n_param_combs, "parameter combination"),
+    " was performed using ",
+    desc(x@tuner_config[["resampler_config"]]),
+    ".\n",
+    sep = ""
+  )
+  cat(
+    x@tuner_config[["metric"]],
+    "was",
+    ifelse(x@tuner_config[["maximize"]], "maximized", "minimized"),
+    "with the following config:\n"
+  )
+  printls(x@best_hyperparameters)
+  invisible(x)
+} # /rtemis::print.GridSearch
+
+
+# %% repr.GridSearch ----
+method(repr, GridSearch) <- function(
+  x,
+  header = TRUE,
+  pad = 0L,
+  output_type = NULL,
+  ...
+) {
+  out <- character()
+  if (header) {
+    out <- paste0(out, repr_S7name(x@type, pad = pad), "\n")
+  }
+  type <- if (x@tuner_config[["search_type"]] == "exhaustive") {
+    "An exhaustive grid search"
+  } else {
+    paste0(
+      "A randomized grid search (p = ",
+      x@tuner_config[["randomize_p"]],
+      ")"
+    )
+  }
+  n_param_combs <- NROW(x@tuning_results[["param_grid"]])
+  out <- paste0(
+    out,
+    type,
+    " of ",
+    singorplu(n_param_combs, "parameter combination"),
+    " was performed using ",
+    desc(x@tuner_config[["resampler_config"]]),
+    ".\n"
+  )
+  out <- paste(
+    out,
+    x@tuner_config[["metric"]],
+    "was",
+    ifelse(x@tuner_config[["maximize"]], "maximized", "minimized"),
+    "with the following config:\n"
+  )
+  out <- paste(
+    out,
+    repr_ls(x@best_hyperparameters, pad = pad, output_type = output_type),
+    sep = ""
+  )
+  out
+} # /rtemis::repr.GridSearch
+
+
+# %% .list_to_TunerConfig ----
+#' Convert a list to a TunerConfig object
+#'
+#' Internal function used by `rtemis.server` and `SuperConfig` deserialization
+#' to reconstruct a `TunerConfig` object from a named list. Not intended for
+#' direct use by end users.
+#'
+#' @param x Named list: `type` (Character: tuner type; currently only
+#'   `"GridSearch"` is supported) plus, as its siblings, the tuner's settings.
+#'   For `"GridSearch"`: `resampler_config` (a list accepted by
+#'   [.list_to_ResamplerConfig()]), `search_type`, `randomize_p`,
+#'   `metrics_aggregate_fn`, `metric`, and `maximize`. A list holding only
+#'   `type` is that tuner with every default.
+#'
+#' @return A `TunerConfig` object (currently a `GridSearchConfig`).
+#'
+#' @author EDG
+#' @keywords internal
+#' @export
+#' @examples
+#' .list_to_TunerConfig(list(
+#'   type = "GridSearch",
+#'   resampler_config = list(type = "KFold", n_resamples = 5L),
+#'   search_type = "exhaustive"
+#' ))
+.list_to_TunerConfig <- function(x) {
+  if (identical(x[["type"]], "GridSearch")) {
+    label <- "GridSearch tuner"
+    check_no_settings_key(x, "config", "type", label)
+    settings <- .drop_meta_keys(x)
+    settings[["type"]] <- NULL
+    check_wire_keys(settings, names(formals(setup_GridSearch)), label)
+    # Drop absent (NULL) elements so that `setup_GridSearch`'s own argument
+    # defaults apply to whatever the config omits (e.g. `search_type`,
+    # `metrics_aggregate_fn`, `resampler_config`) instead of passing NULL.
+    args <- Filter(Negate(is.null), settings)
+    if (!is.null(args[["resampler_config"]])) {
+      args[["resampler_config"]] <- .list_to_ResamplerConfig(
+        args[["resampler_config"]]
+      )
+    }
+    do.call(setup_GridSearch, args)
+  } else {
+    rtemis.core::abort(
+      "Unsupported tuner type: ",
+      x[["type"]],
+      class = "rtemis_unsupported_error"
+    )
+  }
+} # /rtemis::.list_to_TunerConfig

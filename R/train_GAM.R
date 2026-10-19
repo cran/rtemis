@@ -23,7 +23,7 @@ method(train_, GAMHyperparameters) <- function(
   x,
   weights = NULL,
   dat_validation = NULL,
-  execution_config = setup_ExecutionConfig(),
+  execution_config = setup_FutureExecution(),
   verbosity = 1L
 ) {
   # Dependencies ----
@@ -47,7 +47,7 @@ method(train_, GAMHyperparameters) <- function(
 
   type <- supervised_type(x)
   n_classes <- if (type == "Classification") {
-    nlevels(x[, ncol(x)])
+    nlevels(outcome(x))
   } else {
     NA
   }
@@ -76,21 +76,16 @@ method(train_, GAMHyperparameters) <- function(
   } else {
     ""
   }
-  formula <- as.formula(
+  rhs <- gsub(
+    " \\+ $",
+    "",
     gsub(
-      " \\+ $",
+      "^ \\+ ",
       "",
-      paste(
-        outcome_name(x),
-        "~",
-        gsub(
-          "^ \\+ ",
-          "",
-          paste(spline_features, categorical_features, sep = " + ")
-        )
-      )
+      paste(spline_features, categorical_features, sep = " + ")
     )
   )
+  formula <- as.formula(paste(outcome_name(x), "~", rhs))
 
   # Train ----
   family <- if (type == "Regression") {
@@ -99,8 +94,20 @@ method(train_, GAMHyperparameters) <- function(
     if (n_classes == 2) {
       binomial()
     } else {
-      mgcv::multinom()
+      mgcv::multinom(K = n_classes - 1L)
     }
+  }
+  if (type == "Classification" && n_classes > 2) {
+    # mgcv's multinom family takes the outcome coded 0 to K - 1, the first
+    # level being the reference, and one formula per remaining level, each
+    # with the same terms.
+    formula <- c(
+      list(formula),
+      rep(list(as.formula(paste("~", rhs))), n_classes - 2L)
+    )
+    y <- outcome(x)
+    x <- as.data.frame(x)
+    x[[outcome_name(x)]] <- as.integer(y) - 1L
   }
 
   model <- mgcv::gam(
@@ -117,6 +124,9 @@ method(train_, GAMHyperparameters) <- function(
 # %% predict_super.class_gam ----
 #' Predict from GAM model
 #'
+#' A multiclass fit returns one probability column per outcome level, in level
+#' order.
+#'
 #' @param model GAM model.
 #' @param newdata tabular data: Data to predict on.
 #' @param type Character: Type of supervised learning ("Classification" or "Regression").
@@ -127,6 +137,7 @@ method(predict_super, class_gam) <- function(
   model,
   newdata,
   type = NULL,
+  execution_config = NULL,
   verbosity = 0L
 ) {
   out <- predict(object = model, newdata = newdata, type = "response")
@@ -141,30 +152,40 @@ method(predict_super, class_gam) <- function(
 # %% varimp_super.class_gam ----
 #' Get variable importance from GAM model
 #'
-#' Variable importance for GAM is estimated as the variance of each predictor's partial effect,
-#' obtained via predict(model, type = "terms"). This measures each smooth term's contribution to
-#' the variance of the fitted values. Values are normalized to sum to one, representing each
-#' predictor's proportion of total predicted variance. This approach is computationally efficient
-#' (no refitting required) and analogous to importance measures in tree-based methods. It assumes
-#' approximate uncorrelatedness of partial effects, which penalized smooths tend to satisfy. For
-#' models with high concurvity, consider hierarchical partitioning of R² (e.g. via the gam.hp
-#' package) as an alternative.
+#' The variance over the training cases of each term's contribution to the
+#' linear predictor, from `predict(model, type = "terms")`, divided by the sum
+#' of the term variances. The variance of the linear predictor also contains
+#' the covariances between terms, so for correlated terms these shares do not
+#' partition it.
+#'
+#' A multiclass fit has one linear predictor per non-reference class and no
+#' single partial effect per term, so it returns NULL.
 #'
 #' @param model mgcv gam model.
 #'
 #' @keywords internal
 #' @noRd
-method(varimp_super, class_gam) <- function(
-  model,
-  type = c("partial_effect", "F-test")
-) {
+method(varimp_super, class_gam) <- function(model) {
+  if (identical(model[["family"]][["family"]], "multinom")) {
+    return(NULL)
+  }
   peff <- predict(model, type = "terms")
   vi <- apply(peff, 2, var)
-  npeff <- vi / sum(vi) # normalized importance
+  npeff <- vi / sum(vi)
   VariableImportance(
-    data.table(
-      variable = names(npeff),
-      Partial_Effect_Variance = unname(npeff)
+    measures = list(
+      Partial_Effect_Variance = importance_measure(
+        names(npeff),
+        unname(npeff),
+        kind = "partial_effect_variance",
+        description = paste0(
+          "Variance over the training cases of the term's contribution to the ",
+          "linear predictor (mgcv term contributions), divided by the sum of ",
+          "the term variances; covariances between terms are not included, ",
+          "so the shares do not partition the variance of the linear ",
+          "predictor."
+        )
+      )
     )
   )
 } # /rtemis::varimp_super.gam
@@ -173,11 +194,100 @@ method(varimp_super, class_gam) <- function(
 # %% se_super.class_gam ----
 #' Get Standard Errors from GAM model
 #'
+#' Standard errors of the linear predictor. A multiclass fit has one linear
+#' predictor per non-reference class and returns NULL.
+#'
 #' @param model mgcv gam model.
 #' @param newdata tabular data: Data to predict on.
 #'
 #' @keywords internal
 #' @noRd
 method(se_super, class_gam) <- function(model, newdata) {
+  if (identical(model[["family"]][["family"]], "multinom")) {
+    return(NULL)
+  }
   predict(model, newdata = newdata, se.fit = TRUE)[["se.fit"]]
 } # /rtemis::se_super.gam
+
+
+# %% explain_super.class_gam ----
+#' Native term contributions from a GAM
+#'
+#' A GAM *is* an additive decomposition -- `train_GAM()` builds one smooth or
+#' parametric term per feature -- so `predict(type = "terms")` returns the
+#' quantity a Shapley value is defined as, and no coalition needs enumerating.
+#' The terms are re-centered on the supplied background, so the baseline is the
+#' mean prediction over that background, as for every other estimator.
+#'
+#' Exact, and computed by the fit itself, so it is both more accurate and faster
+#' than the kernel estimator here. Applies to regression and binary fits; a
+#' multiclass fit is refused.
+#'
+#' @param model `gam` object.
+#' @param newdata tabular data: Cases to explain.
+#' @param background tabular data: Reference cases.
+#' @param estimator Character: Resolved estimator.
+#' @param perturbation Character: Resolved value function.
+#' @param scale Character: Scale the contributions are additive on.
+#' @param type Character: "Regression" or "Classification".
+#' @param verbosity Integer: Verbosity level.
+#'
+#' @return List with `phi`, `baseline`, `predicted` and `exact`.
+#'
+#' @keywords internal
+#' @noRd
+method(explain_super, class_gam) <- function(
+  model,
+  newdata,
+  background,
+  estimator,
+  perturbation,
+  scale,
+  type,
+  verbosity = 0L
+) {
+  if (!identical(estimator, "GAMTerms")) {
+    rtemis.core::abort(
+      "GAM's explain_super() computes GAMTerms, not ",
+      estimator,
+      ".",
+      class = c("rtemis_unsupported_error", "rtemis_input_error")
+    )
+  }
+  if (!identical(perturbation, "interventional")) {
+    rtemis.core::abort(
+      "Conditional GAMTerms is not implemented: a term is evaluated at the ",
+      "case's own value against the background's marginal mean, which is the ",
+      "interventional answer.\n",
+      "Use `setup_SHAP(perturbation = \"interventional\")`, or ",
+      "`setup_SHAP(estimator = \"kernel\", perturbation = \"conditional\")`.",
+      class = c("rtemis_unsupported_error", "rtemis_input_error")
+    )
+  }
+  if (identical(model[["family"]][["family"]], "multinom")) {
+    rtemis.core::abort(
+      "GAMTerms is not available for multiclass GAM: the fitted model has one ",
+      "linear predictor per non-reference class, not one per class.\n",
+      "Use `setup_SHAP(estimator = \"kernel\")`.",
+      class = c("rtemis_unsupported_error", "rtemis_input_error")
+    )
+  }
+  shap_require_background(background, "GAMTerms")
+  newdata <- as.data.frame(newdata)
+  background <- as.data.frame(background)
+  terms_new <- predict(model, newdata = newdata, type = "terms")
+  terms_background <- predict(model, newdata = background, type = "terms")
+  additive_terms_shap(
+    terms_new = terms_new,
+    terms_background = terms_background,
+    feature_of_term = terms_feature_map(
+      colnames(terms_new),
+      names(newdata),
+      "GAMTerms"
+    ),
+    feature_names = names(newdata),
+    margin_new = predict(model, newdata = newdata, type = "link"),
+    margin_background = predict(model, newdata = background, type = "link"),
+    label = "GAMTerms"
+  )
+} # /rtemis::explain_super.gam

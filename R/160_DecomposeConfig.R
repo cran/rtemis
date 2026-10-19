@@ -1,0 +1,206 @@
+# 160_DecomposeConfig.R
+# ::rtemis::
+# 2026- EDG rtemis.org
+
+# References ----
+# https://github.com/RConsortium/S7
+# https://rconsortium.github.io/S7/
+
+# %% DecomposeConfig ----
+#' DecomposeConfig Class
+#'
+#' @description
+#' Decomposition Pipeline Configuration Class. A portable, data-agnostic recipe
+#' for a decomposition pipeline: it bundles the input data path, the
+#' algorithm-specific `DecompositionConfig`, the `ExecutionConfig`, and the
+#' output directory, so the
+#' same config can be validated, shared, written to disk, or described without
+#' data and have a path bound later (e.g. by the `rtemis` CLI) before [decomp].
+#'
+#' @author EDG
+#' @noRd
+DecomposeConfig <- schema_class(
+  name = "DecomposeConfig",
+  package = "rtemis",
+  defaults = list(
+    execution_config = DefaultPolicy(
+      kind = "literal",
+      value = list(backend = "future")
+    )
+  ),
+  properties = list(
+    dat_path = prop_string(
+      NULL,
+      nullable = TRUE,
+      description = "Path to the input data."
+    ),
+    # Nested config object (a `$ref` in the generated schema).
+    decomposition_config = prop_object(
+      DecompositionConfig,
+      nullable = TRUE,
+      description = "Decomposition algorithm and its settings, including the feature columns to decompose. Absent = the default algorithm with its default settings on all numeric columns."
+    ),
+    execution_config = prop_object(
+      ExecutionConfig,
+      description = "Execution backend, worker and thread counts, failure policy and seed. A decomposition dispatches no work to other processes, so its workers are threads for an algorithm that uses them."
+    ),
+    outdir = prop_string(
+      "results/",
+      description = "Output directory for results."
+    ),
+    verbosity = prop_integer(
+      1L,
+      min = 0L,
+      description = "Verbosity level."
+    )
+  ),
+  publication = SchemaPublication(
+    role = "document",
+    slug = "decompose",
+    title = "rtemis DecomposeConfig",
+    description = "Language-independent config for an rtemis decomposition pipeline: a data reference, a `DecompositionConfig`, an `ExecutionConfig`, and an output directory.",
+    order = 5L,
+    kind = "pipeline",
+    record_provenance = "rtemis::Provenance",
+    record_metrics = "rtemis::DecompositionMetrics"
+  )
+) # /rtemis::DecomposeConfig
+
+
+# %% repr.DecomposeConfig ----
+#' Repr DecomposeConfig
+#'
+#' @param x `DecomposeConfig` object.
+#' @param pad Integer: Number of spaces to pad the message with.
+#' @param output_type Character {"ansi", "html", or "plain"}: Output type.
+#'
+#' @return Character: Formatted string that can be printed with cat()
+#'
+#' @author EDG
+#' @noRd
+method(repr, DecomposeConfig) <- function(x, pad = 0L, output_type = NULL) {
+  out <- repr_S7name("DecomposeConfig", pad = pad, output_type = output_type)
+  out <- paste0(
+    out,
+    repr_ls(props(x), pad = pad, limit = 20L, output_type = output_type)
+  )
+  out
+} # /rtemis::repr.DecomposeConfig
+
+
+# %% print.DecomposeConfig ----
+#' Print `DecomposeConfig`
+#'
+#' @param x `DecomposeConfig` object.
+#' @param ... Not used.
+#'
+#' @author EDG
+#' @noRd
+method(print, DecomposeConfig) <- function(x, output_type = NULL, ...) {
+  cat(repr(x, output_type = output_type))
+  invisible(x)
+} # /rtemis::print.DecomposeConfig
+
+
+# %% setup_DecomposeConfig ----
+#' Setup DecomposeConfig
+#'
+#' Setup a `DecomposeConfig` object. `DecomposeConfig` is a portable,
+#' data-agnostic recipe for a decomposition pipeline: `dat_path` is optional, so
+#' the same config can be validated, shared, or described without data and have a
+#' path bound later (e.g. by the `rtemis` CLI) before [decomp].
+#'
+#' @param dat_path Character or NULL: Path to input data file. NULL leaves the
+#' recipe unbound; set it (or supply data) before [decomp].
+#' @param decomposition_config `DecompositionConfig` object or NULL: Configuration
+#' for the decomposition itself. Setup with a decomposition `setup_*` function,
+#' e.g. [setup_PCA]. If NULL, [decomp] runs its default algorithm with default
+#' settings.
+#' @param execution_config `ExecutionConfig` object: Execution settings, e.g.
+#' [setup_FutureExecution]. Its workers are threads for an algorithm that uses
+#' them, and its seed seeds the fit.
+#' @param outdir Character: Output directory for results.
+#' @param verbosity Integer [0, Inf): Verbosity level.
+#'
+#' @return `DecomposeConfig` object.
+#'
+#' @author EDG
+#' @export
+#' @examples
+#' dc <- setup_DecomposeConfig(
+#'   dat_path = "data.csv",
+#'   decomposition_config = setup_PCA(k = 3L),
+#'   outdir = "results/"
+#' )
+setup_DecomposeConfig <- function(
+  dat_path = NULL,
+  decomposition_config = NULL,
+  execution_config = setup_FutureExecution(),
+  outdir = "results/",
+  verbosity = 1L
+) {
+  apply_setup_defaults(DecomposeConfig)
+  # Validated, not resolved: a config is a portable recipe, so it stores the
+  # path as its author wrote it, unresolved against this machine's working
+  # directory.
+  if (!is.null(dat_path)) {
+    dat_path <- sanitize_path(dat_path, must_exist = FALSE, normalize = FALSE)
+  }
+  outdir <- sanitize_path(
+    outdir,
+    must_exist = FALSE,
+    type = "any",
+    normalize = FALSE
+  )
+
+  DecomposeConfig(
+    dat_path = dat_path,
+    decomposition_config = decomposition_config,
+    execution_config = execution_config,
+    outdir = outdir,
+    verbosity = as.integer(verbosity)
+  )
+} # /rtemis::setup_DecomposeConfig
+
+
+# %% .list_to_DecomposeConfig ----
+#' Convert a list to a `DecomposeConfig` object
+#'
+#' Internal function used by [read_config] to reconstruct a `DecomposeConfig`
+#' from a named list, such as the result of parsing a JSON config. The nested
+#' `decomposition_config` is rebuilt via `.list_to_DecompositionConfig`.
+#'
+#' @param x Named list carrying `DecomposeConfig` fields (e.g. `dat_path`,
+#'   `decomposition_config`, `execution_config`, `outdir`).
+#'
+#' @return `DecomposeConfig` object.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+.list_to_DecomposeConfig <- function(x) {
+  check_wire_keys(x, names(DecomposeConfig@properties), "decompose config")
+  args <- list(
+    dat_path = x[["dat_path"]],
+    decomposition_config = if (is.null(x[["decomposition_config"]])) {
+      NULL
+    } else {
+      .list_to_DecompositionConfig(x[["decomposition_config"]])
+    }
+  )
+  # `execution_config`, `outdir` and `verbosity` carry non-NULL defaults in
+  # `setup_DecomposeConfig`; only override them when the config actually
+  # supplies a value, so a portable recipe that omits them keeps the defaults.
+  if (!is.null(x[["execution_config"]])) {
+    args[["execution_config"]] <- .list_to_ExecutionConfig(
+      x[["execution_config"]]
+    )
+  }
+  if (!is.null(x[["outdir"]])) {
+    args[["outdir"]] <- x[["outdir"]]
+  }
+  if (!is.null(x[["verbosity"]])) {
+    args[["verbosity"]] <- x[["verbosity"]]
+  }
+  do.call(setup_DecomposeConfig, args)
+} # /rtemis::.list_to_DecomposeConfig

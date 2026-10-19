@@ -7,7 +7,12 @@
 #'
 #' @keywords internal
 #' @noRd
-method(cluster_, DBSCANConfig) <- function(config, x, verbosity = 1L) {
+method(cluster_, DBSCANConfig) <- function(
+  config,
+  x,
+  execution_config = NULL,
+  verbosity = 1L
+) {
   # Checks ----
   check_is_S7(config, DBSCANConfig)
 
@@ -33,6 +38,20 @@ method(cluster_, DBSCANConfig) <- function(config, x, verbosity = 1L) {
   check_inherits(clust, "dbscan")
   clust
 } # /rtemis::cluster_.DBSCANConfig
+
+
+# %% cluster_k.DBSCANConfig ----
+# DBSCAN's non-noise labels do enumerate its fitted clusters -- it cannot
+# produce a cluster that won no case -- so counting them is correct here, and
+# only here. Label 0 is the noise sentinel and is not a cluster: without the
+# `setdiff()` a fit that found three clusters and left some cases unassigned
+# reports four, and a fit that found none at all reports one.
+#
+#' @keywords internal
+#' @noRd
+method(cluster_k, DBSCANConfig) <- function(config, clust) {
+  length(setdiff(unique(clust[["cluster"]]), 0L))
+} # /rtemis::cluster_k.DBSCANConfig
 
 
 # %% clustpredict_DBSCAN ----

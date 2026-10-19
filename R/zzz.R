@@ -11,58 +11,41 @@
 # rtemis internal environment
 live <- new.env()
 live[["parallelized_learners"]] <- c(
+  "BART",
   "LightGBM",
   "LightRF",
   "LightRuleFit",
-  "Ranger"
+  "LINADForest",
+  "MLP",
+  "Ranger",
+  "TabNet"
 )
 
 # vars
 rtemis_version <- utils::packageVersion("rtemis")
 
+# `self` is injected by `torch::nn_module()` into the `initialize` and `forward`
+# it builds a module from, so static analysis sees it as a free variable.
+utils::globalVariables("self")
+
 # References
 # Unicode emojis: https://www.unicode.org/emoji/charts/full-emoji-list.html
 
-# Progress reporting
-setup_progress <- function() {
-  progressr::handlers(global = TRUE)
-  progressr::handlers(
-    progressr::handler_cli(
-      format = "{cli::pb_spin} [{pb_current}/{pb_total}] {pb_status}",
-      format_done = "{cli::col_green(cli::symbol$tick)} Completed {pb_total} tasks",
-      show_after = 0,
-      clear = FALSE
-    )
-  )
-}
-
 .onLoad <- function(libname, pkgname) {
+  .schema_catalog_cache[["ready"]] <- TRUE
   # S7
   S7::methods_register()
-  # Set default options if not already set by user
-  if (is.null(getOption("rtemis_theme"))) {
-    options(rtemis_theme = "whitegrid")
-  }
-  if (is.null(getOption("rtemis_palette"))) {
-    options(rtemis_palette = "rtms")
-  }
-  if (is.null(getOption("rtemis_font"))) {
-    options(rtemis_font = "Helvetica")
-  }
-  # setup_progress()
 }
 
 .onAttach <- function(libname, pkgname) {
   if (interactive()) {
-    # setup_progress()
     ncores <- default_n_workers(omit = 0L)
     vline <- paste0(
       "\n  .:",
       bold(pkgname),
       " v.",
       rtemis_version,
-      " \U1F30A",
-      " ",
+      " \Ub7 ",
       utils::sessionInfo()[[2]],
       " (",
       ncores,
@@ -73,23 +56,13 @@ setup_progress <- function() {
       pkglogo(),
       vline,
       fmt_gradient(
-        paste0(rep("\u2500", nchar(vline) - 14L), collapse = ""),
+        paste0(rep("\u2500", nchar(vline) - 15L), collapse = ""),
         colors = c(
           rtemis_colors[["red"]],
           rtemis_colors[["orange"]],
           rtemis_colors[["red"]]
         )
       ),
-      bold("\n  Defaults"),
-      "\n  \u2502   ",
-      gray("Theme: "),
-      getOption("rtemis_theme", "whitegrid"),
-      "\n  \u2502    ",
-      gray("Font: "),
-      getOption("rtemis_font", "Helvetica"),
-      "\n  \u2514 ",
-      gray("Palette: "),
-      getOption("rtemis_palette", "rtms"),
       bold("\n  Resources"),
       "\n  \u2502    ",
       gray("Docs:"),
